@@ -40,6 +40,7 @@ npm run build
 | Warna dan konfigurasi tema Tailwind | `tailwind.config.js` |
 | Judul awal, deskripsi SEO, warna browser | `index.html` |
 | Gambar, logo, favicon, dan aset statis | `public/` |
+| Halaman Tentang, Kontak, Ketentuan, dan Privasi | `src/InfoPage.jsx` |
 
 ### Mengubah teks dan bahasa
 
@@ -110,7 +111,18 @@ Ubah `<title>`, `description`, atau `theme-color` di `index.html`. Judul halaman
 
 ### Mengubah tautan tombol dan footer
 
-Tautan tombol ditulis sebagai atribut `href` di `src/App.jsx`. Saat ini sebagian tombol mengarah ke bagian paket (`#paket`), tautan footer mengarah ke `#privasi`, dan tombol paket memakai URL contoh `/order?plan=...`. Ganti nilai `href` dengan URL tujuan yang benar saat halaman login, bantuan, ketentuan, privasi, atau checkout sudah tersedia.
+Tautan tombol ditulis sebagai atribut `href` di `src/App.jsx`. Tombol paket memakai URL contoh `/order?plan=...`. Ganti nilainya dengan URL tujuan yang benar saat halaman checkout tersedia.
+
+### Halaman informasi
+
+Halaman informasi tersedia di alamat `/about`, `/contact`, `/terms`, dan `/privacy`. Isi halaman serta terjemahan Indonesia/Inggris berada di `src/InfoPage.jsx`; tampilannya diatur melalui class `info-*` di `src/styles.css`.
+
+Sebelum mempublikasikan:
+
+- Isi `contactDetails` di bagian atas `src/InfoPage.jsx` dengan email dukungan, nomor WhatsApp format internasional (angka saja atau dengan tanda `+`), alamat perusahaan, dan jam operasional. Nilai yang kosong ditampilkan sebagai "Belum tersedia".
+- Form tiket di `/contact` adalah placeholder antarmuka dan belum mengirim atau menyimpan data. Jangan minta pengunjung memasukkan data sungguhan sebelum dihubungkan ke API pembuatan tiket FossBilling. Implementasikan pengiriman di server, validasi input di server, dan perlindungan spam; jangan menaruh kredensial FossBilling di React/browser.
+- Tinjau dan sesuaikan Ketentuan Layanan serta Kebijakan Privasi di file yang sama dengan badan usaha/operator, layanan, pemrosesan data, pembayaran, dan hukum yang benar-benar berlaku. Teks saat ini adalah draf umum, bukan nasihat hukum.
+- Pastikan web server produksi mengarahkan permintaan halaman frontend seperti `/about` dan `/privacy` ke `index.html` (SPA fallback). Jangan mengalihkan endpoint `/api/*` PHP ke `index.html`; endpoint itu harus tetap dijalankan oleh PHP.
 
 ## Endpoint harga dan FossBilling
 

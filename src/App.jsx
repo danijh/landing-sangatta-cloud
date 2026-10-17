@@ -18,6 +18,7 @@ import {
   UsersRound,
   X,
 } from 'lucide-react'
+import InfoPage from './InfoPage.jsx'
 
 const content = {
   id: {
@@ -101,7 +102,7 @@ const content = {
     ctaBody: 'Mulai dengan cloud yang terasa lebih personal.',
     ctaButton: 'Temukan paketmu',
     footerText: 'Ruang digital yang lebih tenang, untuk semua orang.',
-    footerLinks: ['Ketentuan', 'Privasi', 'Bantuan'],
+    footerLinks: ['Tentang Kami', 'Hubungi Kami', 'Ketentuan Layanan', 'Kebijakan Privasi'],
     menuLabel: 'Buka menu',
     closeMenu: 'Tutup menu',
     languageLabel: 'Bahasa',
@@ -187,7 +188,7 @@ const content = {
     ctaBody: 'Start with a cloud that feels more personal.',
     ctaButton: 'Find your plan',
     footerText: 'A calmer digital space, made for everyone.',
-    footerLinks: ['Terms', 'Privacy', 'Support'],
+    footerLinks: ['About', 'Contact Us', 'Terms of Service', 'Privacy Policy'],
     menuLabel: 'Open menu',
     closeMenu: 'Close menu',
     languageLabel: 'Language',
@@ -201,7 +202,7 @@ const formatPrice = (amount, currency, language) =>
     maximumFractionDigits: 0,
   }).format(amount)
 
-function App() {
+function LandingPage() {
   const [language, setLanguage] = useState('id')
   const [billing, setBilling] = useState('monthly')
   const [plans, setPlans] = useState([])
@@ -633,8 +634,14 @@ function App() {
               <p className="mt-3 text-xs text-white/45">{t.footerText}</p>
             </div>
             <div className="flex flex-wrap items-center gap-5 text-xs text-white/55">
-              {t.footerLinks.map((link) => (
-                <a className="footer-link" href="#privasi" key={link}>{link}</a>
+              {t.footerLinks.map((link, index) => (
+                <a
+                  className="footer-link"
+                  href={['/about', '/contact', '/terms', '/privacy'][index]}
+                  key={link}
+                >
+                  {link}
+                </a>
               ))}
               <span className="text-white/30">© 2026 RuangAwan</span>
             </div>
@@ -647,6 +654,17 @@ function App() {
       </a>
     </div>
   )
+}
+
+function App() {
+  const page = {
+    '/about': 'about',
+    '/contact': 'contact',
+    '/terms': 'terms',
+    '/privacy': 'privacy',
+  }[window.location.pathname.replace(/\/+$/, '')]
+
+  return page ? <InfoPage page={page} /> : <LandingPage />
 }
 
 export default App
