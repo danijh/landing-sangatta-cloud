@@ -10,14 +10,14 @@ import {
   Phone,
 } from 'lucide-react'
 
-const contactDetails = {
+export const contactDetails = {
   email: '',
   whatsapp: '',
   address: '',
   officeHours: '',
 }
 
-const copy = {
+export const copy = {
   id: {
     brand: 'Sangatta Cloud',
     home: 'Beranda',
@@ -317,20 +317,43 @@ const pagePaths = ['/about', '/contact', '/terms', '/privacy']
 function InfoPage({ page }) {
   const [language, setLanguage] = useState('id')
   const [ticketNotice, setTicketNotice] = useState(false)
+  const [savedContent, setSavedContent] = useState(null)
+  const [contentLoadError, setContentLoadError] = useState(false)
   const t = copy[language]
-  const pageContent = t.pages[page]
+  const pageContent = savedContent?.pages?.[language]?.[page] ?? t.pages[page]
   const isLegalPage = page === 'terms' || page === 'privacy'
-  const whatsappNumber = contactDetails.whatsapp.replace(/\D/g, '')
+  const contacts = { ...contactDetails, ...savedContent?.contacts }
+  const whatsappNumber = contacts.whatsapp.replace(/\D/g, '')
   const contactItems = [
-    { icon: Mail, value: contactDetails.email, href: contactDetails.email ? `mailto:${contactDetails.email}` : '' },
+    { icon: Mail, value: contacts.email, href: contacts.email ? `mailto:${contacts.email}` : '' },
     {
       icon: Phone,
-      value: contactDetails.whatsapp,
+      value: contacts.whatsapp,
       href: whatsappNumber ? `https://wa.me/${whatsappNumber}` : '',
     },
-    { icon: MapPin, value: contactDetails.address },
-    { icon: null, value: contactDetails.officeHours },
+    { icon: MapPin, value: contacts.address },
+    { icon: null, value: contacts.officeHours },
   ]
+
+  useEffect(() => {
+    let active = true
+    fetch('/api/admin-content.php?action=public')
+      .then((response) => {
+        if (!response.ok) throw new Error(`Content API returned ${response.status}`)
+        return response.json()
+      })
+      .then((result) => {
+        if (active && result.content) setSavedContent(result.content)
+      })
+      .catch((error) => {
+        console.error('Unable to load page content:', error)
+        if (active) setContentLoadError(true)
+      })
+
+    return () => {
+      active = false
+    }
+  }, [])
 
   const handleTicketSubmit = (event) => {
     event.preventDefault()
@@ -385,6 +408,13 @@ function InfoPage({ page }) {
         </section>
 
         <section className="info-content site-container">
+          {contentLoadError && (
+            <p className="info-content-warning" role="alert">
+              {language === 'id'
+                ? 'Konten terbaru belum dapat dimuat. Informasi yang tampil mungkin belum diperbarui.'
+                : 'The latest content could not be loaded. The information shown may be outdated.'}
+            </p>
+          )}
           {page === 'contact' ? (
             <div className="contact-layout">
               <aside className="contact-details">
@@ -420,8 +450,8 @@ function InfoPage({ page }) {
                 </div>
                 <p className="contact-detail-note">
                   {language === 'id'
-                    ? 'Email, WhatsApp, alamat perusahaan, dan jam operasional dapat diatur di src/InfoPage.jsx.'
-                    : 'Email, WhatsApp, company address, and office hours can be configured in src/InfoPage.jsx.'}
+                    ? 'Email, WhatsApp, alamat perusahaan, dan jam operasional dikelola oleh tim Sangatta Cloud.'
+                    : 'Email, WhatsApp, company address, and office hours are managed by the Sangatta Cloud team.'}
                 </p>
               </aside>
 

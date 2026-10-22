@@ -19,12 +19,13 @@ import {
   X,
 } from 'lucide-react'
 import InfoPage from './InfoPage.jsx'
+import AdminPage from './AdminPage.jsx'
 
 const content = {
   id: {
-    title: 'RuangAwan — Cloud yang terasa lebih personal',
-    nav: ['Paket', 'Fitur', 'Privasi'],
-    signIn: 'Masuk',
+    title: 'Sangatta Cloud — Cloud yang terasa lebih personal',
+    nav: ['Paket', 'Fitur', 'Hubungi Kami'],
+    signIn: 'Masuk/Daftar',
     getStarted: 'Mulai sekarang',
     eyebrow: 'Cloud privat, hidup lebih ringan',
     heroTitle: 'Ruang digitalmu, tetap milikmu.',
@@ -50,8 +51,8 @@ const content = {
     users: 'pengguna',
     choose: 'Pilih paket',
     popular: 'Favorit banyak orang',
-    placeholderNotice:
-      'Harga di bawah adalah contoh sementara. Tarif final akan dimuat dari server FossBilling.',
+    // placeholderNotice:
+    //   'Harga di bawah adalah contoh sementara. Tarif final akan dimuat dari server FossBilling.',
     loading: 'Memuat paket…',
     loadError: 'Paket belum bisa dimuat.',
     retry: 'Coba lagi',
@@ -108,9 +109,9 @@ const content = {
     languageLabel: 'Bahasa',
   },
   en: {
-    title: 'RuangAwan — A more personal cloud',
-    nav: ['Plans', 'Features', 'Privacy'],
-    signIn: 'Sign in',
+    title: 'Sangatta Cloud — A more personal cloud',
+    nav: ['Plans', 'Features', 'Contact Us'],
+    signIn: 'Sign in/Sign up',
     getStarted: 'Get started',
     eyebrow: 'Private cloud, lighter living',
     heroTitle: 'Your digital space, yours to keep.',
@@ -214,7 +215,7 @@ function LandingPage() {
   const loadPlans = async () => {
     setPriceState('loading')
     try {
-      const response = await fetch('/api/pricing.php')
+      const response = await fetch('./api/pricing.php')
       if (!response.ok) {
         throw new Error(`Pricing API returned ${response.status}`)
       }
@@ -248,12 +249,12 @@ function LandingPage() {
     <div className="min-h-screen overflow-hidden bg-[#fbfaf8] text-ink">
       <header className="absolute inset-x-0 top-0 z-30">
         <div className="site-container flex h-[84px] items-center justify-between">
-          <a className="brand-lockup" href="#top" aria-label="RuangAwan home">
+          <a className="brand-lockup" href="#top" aria-label="Sangatta Cloud home">
             <span className="brand-mark">
               <Cloud size={21} strokeWidth={2.2} />
             </span>
-            <span className="text-[17px] font-bold tracking-[-0.04em]">
-              ruangawan<span className="text-teal">.</span>
+            <span className="text-teal text-[40px] font-bold tracking-[-0.04em]">
+              Sangatta <span className="text-[#8a94a6]">Cloud</span><span className="text-ember animate-pulse">.</span>
             </span>
           </a>
 
@@ -314,7 +315,7 @@ function LandingPage() {
               <h1 className="mt-7 max-w-[610px] text-[clamp(3.25rem,6.25vw,5.65rem)] font-semibold leading-[0.98] tracking-[-0.075em] text-white">
                 {t.heroTitle}
               </h1>
-              <p className="mt-7 max-w-[490px] text-base leading-7 text-white/70 md:text-[20px] md:leading-8">
+              <p className="mt-7 max-w-[490px] text-base leading-7 text-white/70 md:text-[18px] md:leading-8">
                 {t.heroBody}
               </p>
               <div className="mt-9 flex flex-wrap items-center gap-4">
@@ -366,7 +367,7 @@ function LandingPage() {
               <div className="cloud-window">
                 <div className="window-topbar">
                   <div className="window-dots"><i /><i /><i /></div>
-                  <div className="window-lock"><LockKeyhole size={11} /> ruangawan</div>
+                  <div className="window-lock"><LockKeyhole size={11} /> Sangatta Cloud</div>
                   <div className="window-menu"><span /><span /><span /></div>
                 </div>
                 <div className="window-content">
@@ -483,6 +484,7 @@ function LandingPage() {
                   {plans.map((plan) => {
                     const isYearly = billing === 'yearly'
                     const localizedPlan = plan.translations?.[language] ?? plan
+                    const planFeatures = localizedPlan.features ?? plan.features ?? []
                     const price = formatPrice(
                       isYearly ? plan.annual_price : plan.monthly_price,
                       currency,
@@ -500,7 +502,7 @@ function LandingPage() {
                         {plan.featured && <span className="plan-ribbon">{t.popular}</span>}
                         <div className="flex items-start justify-between">
                           <span className="plan-name">{localizedPlan.name}</span>
-                          <span className="plan-storage">{plan.storage}</span>
+                          {plan.storage && <span className="plan-storage">{plan.storage}</span>}
                         </div>
                         <p className="mt-3 min-h-10 text-[13px] leading-5 text-ink/55">
                           {localizedPlan.description}
@@ -526,18 +528,22 @@ function LandingPage() {
                           <ArrowUpRight size={15} />
                         </a>
                         <div className="plan-divider" />
-                        <div className="plan-user">
-                          <UsersRound size={15} />
-                          {plan.users} {t.users}
-                        </div>
-                        <ul className="mt-4 space-y-3">
-                          {localizedPlan.features.map((feature) => (
-                            <li className="plan-feature" key={feature}>
-                              <span><Check size={12} /></span>
-                              {feature}
-                            </li>
-                          ))}
-                        </ul>
+                        {Number.isInteger(plan.users) && plan.users > 0 && (
+                          <div className="plan-user">
+                            <UsersRound size={15} />
+                            {plan.users} {t.users}
+                          </div>
+                        )}
+                        {planFeatures.length > 0 && (
+                          <ul className="mt-4 space-y-3">
+                            {planFeatures.map((feature) => (
+                              <li className="plan-feature" key={feature}>
+                                <span><Check size={12} /></span>
+                                {feature}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                       </article>
                     )
                   })}
@@ -623,12 +629,12 @@ function LandingPage() {
         <div className="site-container">
           <div className="flex flex-col justify-between gap-7 py-8 md:flex-row md:items-center">
             <div>
-              <a className="brand-lockup" href="#top" aria-label="RuangAwan home">
+              <a className="brand-lockup" href="#top" aria-label="Sangatta Cloud home">
                 <span className="brand-mark footer-brand-mark">
                   <Cloud size={19} strokeWidth={2.2} />
                 </span>
-                <span className="text-[16px] font-bold tracking-[-0.04em]">
-                  ruangawan<span className="text-teal">.</span>
+                <span className="text-teal text-[25px] font-bold tracking-[-0.04em]">
+                  Sangatta <span className="text-[#8a94a6]">Cloud</span> <span className="text-ember animate-pulse">.</span>
                 </span>
               </a>
               <p className="mt-3 text-xs text-white/45">{t.footerText}</p>
@@ -643,7 +649,7 @@ function LandingPage() {
                   {link}
                 </a>
               ))}
-              <span className="text-white/30">© 2026 RuangAwan</span>
+              <span className="text-white/30">© 2026 Sangatta Cloud</span>
             </div>
           </div>
         </div>
@@ -657,6 +663,10 @@ function LandingPage() {
 }
 
 function App() {
+  if (window.location.pathname.replace(/\/+$/, '') === '/admin') {
+    return <AdminPage />
+  }
+
   const page = {
     '/about': 'about',
     '/contact': 'contact',

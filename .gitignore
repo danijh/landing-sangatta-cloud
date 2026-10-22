@@ -7,6 +7,7 @@ dist/
 .env
 .env.*
 !.env.example
+storage/
 
 # Logs and temporary files
 *.log

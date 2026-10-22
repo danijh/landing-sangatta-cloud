@@ -40,7 +40,8 @@ npm run build
 | Warna dan konfigurasi tema Tailwind | `tailwind.config.js` |
 | Judul awal, deskripsi SEO, warna browser | `index.html` |
 | Gambar, logo, favicon, dan aset statis | `public/` |
-| Halaman Tentang, Kontak, Ketentuan, dan Privasi | `src/InfoPage.jsx` |
+| Konten awal halaman Tentang, Kontak, Ketentuan, dan Privasi | `src/InfoPage.jsx` |
+| Konten halaman setelah diedit di panel admin | `/admin` (disimpan di `storage/site-content.json`) |
 
 ### Mengubah teks dan bahasa
 
@@ -55,11 +56,9 @@ Beberapa teks pada ilustrasi/mockup hero ditulis langsung di JSX, tidak di objek
 
 ### Mengubah paket dan harga
 
-Buka `public/api/pricing.php`. Setiap paket berada di dalam array `$plans`. Ubah nama, kapasitas (`storage`), jumlah pengguna (`users`), harga bulanan (`monthly_price`), harga tahunan (`annual_price`), deskripsi, dan daftar `features` sesuai kebutuhan.
-
-Teks Bahasa Inggris untuk paket berada di `translations.en`. Pertahankan struktur data yang sudah ada agar kartu paket tetap dapat ditampilkan. `featured: true` menandai paket unggulan. Nilai `currency` menentukan mata uang yang ditampilkan, misalnya `IDR`.
-
-File ini sekarang menggunakan data contoh (`"source": "placeholder"`). Untuk harga sungguhan, sambungkan endpoint ini ke FossBilling dari sisi server; jangan menaruh API key, password, atau kredensial di kode React yang dikirim ke browser.
+Nama, deskripsi, dan harga bulanan/tahunan berasal dari FossBilling. Cara
+menambahkan fitur paket dan konfigurasi API dijelaskan di
+[bagian endpoint harga dan FossBilling](#endpoint-harga-dan-fossbilling).
 
 ### Mengganti logo
 
@@ -117,45 +116,180 @@ Tautan tombol ditulis sebagai atribut `href` di `src/App.jsx`. Tombol paket mema
 
 Halaman informasi tersedia di alamat `/about`, `/contact`, `/terms`, dan `/privacy`. Isi halaman serta terjemahan Indonesia/Inggris berada di `src/InfoPage.jsx`; tampilannya diatur melalui class `info-*` di `src/styles.css`.
 
+Konten Tentang, Ketentuan, Privasi, dan informasi kontak juga dapat diubah melalui panel `/admin`. Perubahan disimpan sebagai JSON di direktori `storage/` di luar document root, bukan di database atau browser. PHP harus memiliki izin menulis ke direktori tersebut; lakukan pencadangan file `storage/site-content.json` secara berkala.
+
+Untuk pengembangan lokal, isi `storage/admin-credentials.php` dengan username dan hash password. File ini tidak masuk Git dan hanya dibaca ketika PHP berjalan melalui server pengembangan bawaan PHP (`npm run dev:api`); jangan salin file ini ke server produksi. Buat hash password menggunakan PHP, lalu tempel hasilnya ke nilai `password_hash` (jangan menaruh password asli di file atau command shell):
+
+```sh
+php -r 'echo password_hash(trim(fgets(STDIN)), PASSWORD_DEFAULT), PHP_EOL;'
+```
+
+Jalankan perintah tersebut dan masukkan password saat diminta. `ADMIN_USERNAME` dan `ADMIN_PASSWORD_HASH` dari environment, jika disetel, tetap menjadi sumber utama.
+
+Di produksi, atur environment variable `ADMIN_USERNAME` dan `ADMIN_PASSWORD_HASH` melalui konfigurasi PHP-FPM pool/server. Buat hash password dengan `password_hash()` PHP dan jangan masukkan password atau hash ke kode frontend maupun repository. Sajikan panel melalui HTTPS. Cookie sesi admin menggunakan `HttpOnly` dan `SameSite=Strict`, dan ditandai `Secure` ketika PHP mendeteksi HTTPS. Pastikan file konten berada di luar document root; jika memakai `SITE_CONTENT_FILE`, arahkan ke file JSON di luar document root dan pastikan PHP dapat membuat serta menulis file tersebut.
+
+Endpoint panel memeriksa sesi, token CSRF, membatasi percobaan login per alamat IP, memvalidasi ukuran/struktur konten, dan menyimpan perubahan secara atomik. Konten ditampilkan sebagai teks biasa (bukan HTML). Hapus akses PHP/web ke `/admin` atau batasi lewat konfigurasi server jika panel tidak lagi digunakan.
+
 Sebelum mempublikasikan:
 
-- Isi `contactDetails` di bagian atas `src/InfoPage.jsx` dengan email dukungan, nomor WhatsApp format internasional (angka saja atau dengan tanda `+`), alamat perusahaan, dan jam operasional. Nilai yang kosong ditampilkan sebagai "Belum tersedia".
+- Jika konten kontak belum pernah disimpan dari panel, nilai awalnya berada di `contactDetails` pada `src/InfoPage.jsx`. Nilai kosong ditampilkan sebagai "Belum tersedia".
 - Form tiket di `/contact` adalah placeholder antarmuka dan belum mengirim atau menyimpan data. Jangan minta pengunjung memasukkan data sungguhan sebelum dihubungkan ke API pembuatan tiket FossBilling. Implementasikan pengiriman di server, validasi input di server, dan perlindungan spam; jangan menaruh kredensial FossBilling di React/browser.
 - Tinjau dan sesuaikan Ketentuan Layanan serta Kebijakan Privasi di file yang sama dengan badan usaha/operator, layanan, pemrosesan data, pembayaran, dan hukum yang benar-benar berlaku. Teks saat ini adalah draf umum, bukan nasihat hukum.
-- Pastikan web server produksi mengarahkan permintaan halaman frontend seperti `/about` dan `/privacy` ke `index.html` (SPA fallback). Jangan mengalihkan endpoint `/api/*` PHP ke `index.html`; endpoint itu harus tetap dijalankan oleh PHP.
+- Pastikan web server produksi mengarahkan permintaan halaman frontend seperti `/about`, `/privacy`, dan `/admin` ke `index.html` (SPA fallback). Jangan mengalihkan endpoint `/api/*` PHP ke `index.html`; endpoint itu harus tetap dijalankan oleh PHP.
 
 ## Endpoint harga dan FossBilling
 
-`public/api/pricing.php` saat ini mengembalikan paket dan harga contoh dengan `"source": "placeholder"`. Frontend mengharapkan respons JSON berbentuk:
+`public/api/pricing.php` mengambil daftar dari endpoint publik FossBilling:
+`/api/guest/product/get_list`. PHP di server website mengubah data `result.list`
+menjadi format yang dipakai frontend. Harga bulanan dan tahunan diambil dari
+`pricing.recurrent["1M"]` dan `pricing.recurrent["1Y"]`; produk tanpa kedua
+periode aktif atau tanpa harga valid tidak ditampilkan.
 
-```json
-{
-  "source": "fossbilling",
-  "currency": "IDR",
-  "plans": [
-    {
-      "id": "personal",
-      "name": "Personal",
-      "storage": "100 GB",
-      "users": 1,
-      "monthly_price": 29000,
-      "annual_price": 290000,
-      "description": "Deskripsi paket",
-      "features": ["Fitur paket"],
-      "translations": {
-        "en": {
-          "name": "Personal",
-          "description": "A plan description",
-          "features": ["Plan feature"]
-        }
-      },
-      "featured": false
-    }
-  ]
-}
+Frontend hanya mengakses `/api/pricing.php` di domain website. Jangan panggil
+FossBilling langsung dari browser. Endpoint guest yang digunakan untuk daftar
+produk tidak memerlukan token admin. Endpoint `/api/admin` yang membutuhkan
+token tidak dipakai untuk menampilkan harga; jangan pernah memasukkan token itu
+ke React, URL browser, atau file yang dipublikasikan. Jika kelak server perlu
+memanggil endpoint terproteksi, panggilan harus dibuat dari PHP dan token hanya
+disimpan sebagai environment variable rahasia di server.
+
+Konfigurasikan alamat dasar server FossBilling melalui `FOSSBILLING_BASE_URL`
+(tanpa path `/api/...`) dan mata uang melalui `PRICING_CURRENCY` (default `IDR`).
+HTTPS diwajibkan untuk host publik. HTTP hanya diterima untuk alamat IP private
+atau loopback, agar development dapat mengakses FossBilling di LAN atau API
+Docker yang dipublikasikan hanya ke `127.0.0.1` pada VPS.
+
+Untuk development lokal, jalankan API PHP dengan konfigurasi berikut:
+
+```sh
+FOSSBILLING_BASE_URL=http://192.168.1.22:8085 PRICING_CURRENCY=IDR npm run dev:api
 ```
 
-Bangun aset frontend untuk deployment dengan `npm run build`. Hasil build berada di `dist/`, termasuk endpoint PHP dari folder `public/api`. Pastikan VPS menyediakan PHP untuk menjalankan endpoint tersebut.
+`npm run dev` menjalankan frontend secara terpisah. Vite meneruskan `/api` ke
+server PHP lokal di port 8001.
+
+### Menambahkan fitur paket
+
+Endpoint FossBilling yang tersedia belum mengirim kapasitas, jumlah pengguna,
+atau daftar fitur. Tambahkan informasi yang benar di `$productPresentation`
+pada `public/api/pricing.php`, menggunakan `slug` produk dari FossBilling
+sebagai key. Contoh berikut hanya menunjukkan bentuk datanya; ganti nilainya
+dengan detail paket yang benar:
+
+```php
+$productPresentation = [
+    'active' => [
+        'storage' => '100 GB',
+        'users' => 1,
+        'featured' => false,
+        'features' => [
+            'Fitur paket dalam Bahasa Indonesia',
+        ],
+        'translations' => [
+            'en' => [
+                'name' => 'Active',
+                'description' => 'English plan description.',
+                'features' => ['Plan feature in English'],
+            ],
+        ],
+    ],
+];
+```
+
+`storage` dan `users` bersifat opsional, dan fitur/kapasitas tidak akan dibuat
+otomatis dari data yang tidak disediakan API. Fitur dan terjemahan di atas
+hanya contoh. Tanpa metadata, kartu tetap menampilkan nama, deskripsi, dan
+harga dari FossBilling; bagian fitur dan kapasitas tidak ditampilkan.
+
+### Konfigurasi VPS Debian 13 + Nginx + PHP-FPM
+
+Untuk setup ini, landing page tidak perlu dijalankan dalam Docker. React dibuild
+menjadi file statis, sedangkan Nginx menyajikannya dan meneruskan dua endpoint
+PHP ke PHP-FPM yang sudah tersedia. Ini lebih sederhana daripada menambah
+container, volume/session tambahan, dan jalur jaringan baru. API yang sudah
+berjalan di Docker tetap dapat diakses secara privat dari PHP-FPM host.
+
+Contoh konfigurasi Nginx tersedia di
+[`deploy/nginx/sangatta-cloud.conf.example`](./deploy/nginx/sangatta-cloud.conf.example).
+Sesuaikan domain, path rilis, dan socket PHP-FPM sebelum mengaktifkannya.
+
+1. **Arahkan domain ke VPS.** Setelah domain didaftarkan, atur DNS `A` ke IPv4
+   VPS dan `AAAA` hanya jika IPv6 VPS sudah benar-benar siap. Izinkan port 80
+   dan 443 di firewall; batasi SSH dan jangan publikasikan port internal API
+   atau database.
+2. **Siapkan PHP-FPM.** Debian 13 memakai PHP 8.4. Pasang/aktifkan PHP-FPM dan
+   ekstensi cURL:
+
+   ```sh
+   sudo apt update
+   sudo apt install nginx php8.4-fpm php8.4-curl certbot
+   ls /run/php/php*-fpm.sock
+   ```
+
+   Jika socket bukan `/run/php/php8.4-fpm.sock`, sesuaikan `fastcgi_pass` di
+   konfigurasi Nginx. Pastikan worker PHP-FPM dapat membaca environment
+   variable berikut. Tambahkan baris ini di bagian `[www]` pada
+   `/etc/php/8.4/fpm/pool.d/www.conf`:
+
+   ```ini
+   env[FOSSBILLING_BASE_URL] = "https://billing.example.com"
+   env[PRICING_CURRENCY] = "IDR"
+   env[SITE_CONTENT_FILE] = "/var/lib/sangatta-cloud/site-content.json"
+   env[ADMIN_USERNAME] = "ganti-dengan-username-admin"
+   env[ADMIN_PASSWORD_HASH] = "ganti-dengan-hash-password"
+   ```
+
+   Buat password hash di VPS dengan `password_hash()` PHP, lalu salin hash ke
+   konfigurasi FPM. Jangan menaruh password/token asli di Git. File konten dan
+   rate limit admin disimpan di direktori data terpisah dari document root:
+
+   ```sh
+   sudo install -d -o www-data -g www-data -m 0750 /var/lib/sangatta-cloud
+   sudo systemctl reload php8.4-fpm
+   ```
+
+   Pastikan direktori itu masuk ke backup rutin. Endpoint harga guest tidak
+   memerlukan token FossBilling admin. Jika suatu saat token admin dibutuhkan,
+   simpan sebagai secret server dan hanya gunakan melalui kode PHP server.
+3. **Jangkau API FossBilling secara privat.** Jika API ada di container pada
+   VPS yang sama, publikasikan hanya ke loopback host, misalnya
+   `127.0.0.1:8085:80`, lalu atur `FOSSBILLING_BASE_URL` ke
+   `http://127.0.0.1:8085`. Jangan bind port API ke `0.0.0.0` kecuali memang
+   dilindungi firewall/reverse proxy. Jika API berada di host lain, gunakan
+   koneksi private/VPN atau domain HTTPS yang sertifikatnya valid.
+4. **Build dan deploy hanya isi `dist/`.** Jalankan `npm ci && npm run build`
+   pada mesin build/CI, lalu upload isi `dist/` ke direktori rilis misalnya
+   `/var/www/sangatta-cloud/releases/<rilis>/`. Jangan jadikan checkout Git
+   sebagai document root. Atur symlink `current` ke rilis aktif dan pastikan
+   Nginx/PHP-FPM dapat membaca file dan direktori. Direktori `storage/` lokal
+   dan hasil konten admin tidak boleh masuk ke Git atau ke document root
+   production.
+5. **Aktifkan HTTPS.** Sebelum memasang konfigurasi contoh, ganti
+   `example.com` dan path/socket sesuai server. Terbitkan sertifikat Let's
+   Encrypt setelah DNS aktif, misalnya dengan Certbot menggunakan plugin
+   Nginx atau webroot `/var/www/html`. Pastikan file sertifikat yang dirujuk
+   konfigurasi tersedia. Aktifkan site, lalu validasi dan reload:
+
+   ```sh
+   sudo nginx -t
+   sudo systemctl reload nginx
+   ```
+
+   Konfigurasi contoh mengalihkan HTTP ke HTTPS dan mengatur cookie HTTPS untuk
+   panel admin. Jangan membuka panel login ke internet sebelum HTTPS aktif.
+6. **Verifikasi endpoint dan halaman.** Dari VPS, jalankan
+   `curl -i https://domain-website.example/api/pricing.php`. Pastikan respons
+   JSON memiliki `"source": "fossbilling"` dan harga benar. Uji juga `/admin`,
+   login, penyimpanan konten, dan halaman `/about`. Jika endpoint gagal, cek
+   log Nginx/PHP-FPM; respons API publik memang hanya menampilkan error umum.
+
+Docker dapat dipertimbangkan nanti jika seluruh stack ingin dikelola sebagai
+Compose. Untuk itu, landing/PHP-FPM harus berada di jaringan internal yang sama
+dengan API, data admin harus memakai volume persisten di luar web root, dan
+Nginx host tetap menjadi reverse proxy. Jangan menambahkan container hanya
+karena API lain sudah memakai Docker.
+
+Hasil build berada di `dist/`, termasuk endpoint PHP dari folder `public/api`.
 
 ## Menyimpan perubahan ke GitHub
 
