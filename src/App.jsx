@@ -20,6 +20,8 @@ import {
 } from 'lucide-react'
 import InfoPage from './InfoPage.jsx'
 import AdminPage from './AdminPage.jsx'
+import AuthPage from './AuthPage.jsx'
+import ClientDashboardPage from './ClientDashboardPage.jsx'
 
 const content = {
   id: {
@@ -280,10 +282,10 @@ function LandingPage() {
                 <span>{language === 'id' ? 'ID' : 'EN'}</span>
                 <ChevronDown size={13} />
               </button>
-              <a className="nav-sign-in" href="#paket" onClick={closeMenu}>
+              <a className="nav-sign-in" href="/login" onClick={closeMenu}>
                 {t.signIn}
               </a>
-              <a className="button button-dark nav-cta" href="#paket" onClick={closeMenu}>
+              <a className="button button-dark nav-cta" href="/signup" onClick={closeMenu}>
                 {t.getStarted}
                 <ArrowUpRight size={15} />
               </a>
@@ -663,16 +665,21 @@ function LandingPage() {
 }
 
 function App() {
-  if (window.location.pathname.replace(/\/+$/, '') === '/admin') {
+  const path = window.location.pathname.replace(/\/+$/, '') || '/'
+
+  if (path === '/admin') {
     return <AdminPage />
   }
+  if (path === '/login') return <AuthPage mode="login" />
+  if (path === '/signup') return <AuthPage mode="signup" />
+  if (path === '/dashboard') return <ClientDashboardPage />
 
   const page = {
     '/about': 'about',
     '/contact': 'contact',
     '/terms': 'terms',
     '/privacy': 'privacy',
-  }[window.location.pathname.replace(/\/+$/, '')]
+  }[path]
 
   return page ? <InfoPage page={page} /> : <LandingPage />
 }

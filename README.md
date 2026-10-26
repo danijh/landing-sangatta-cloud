@@ -40,8 +40,16 @@ npm run build
 | Warna dan konfigurasi tema Tailwind | `tailwind.config.js` |
 | Judul awal, deskripsi SEO, warna browser | `index.html` |
 | Gambar, logo, favicon, dan aset statis | `public/` |
+| Halaman login dan pendaftaran pelanggan | `src/AuthPage.jsx` (`/login`, `/signup`) |
+| Pratinjau dashboard pelanggan | `src/ClientDashboardPage.jsx` (`/dashboard`) |
 | Konten awal halaman Tentang, Kontak, Ketentuan, dan Privasi | `src/InfoPage.jsx` |
 | Konten halaman setelah diedit di panel admin | `/admin` (disimpan di `storage/site-content.json`) |
+
+Halaman `/login`, `/signup`, dan `/dashboard` saat ini merupakan pratinjau UI.
+Form login/pendaftaran dan tombol Google belum terhubung ke autentikasi; data
+yang terlihat di dashboard adalah contoh, bukan data akun atau tagihan nyata.
+API key FossBilling dan OAuth client secret harus tetap disimpan di environment
+server, bukan di frontend.
 
 ### Mengubah teks dan bahasa
 
