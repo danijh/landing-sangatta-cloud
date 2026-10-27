@@ -1,8 +1,10 @@
 import {
   ArrowDownToLine,
   ArrowRight,
+  BookOpen,
   Bell,
   ChevronDown,
+  ChevronRight,
   CircleHelp,
   Cloud,
   CreditCard,
@@ -12,11 +14,15 @@ import {
   LayoutDashboard,
   LifeBuoy,
   LogOut,
+  Mail,
   Menu,
+  Newspaper,
   PackagePlus,
   Search,
+  ShoppingCart,
   Settings2,
   ShieldCheck,
+  Wallet,
   X,
 } from 'lucide-react'
 import { useState } from 'react'
@@ -32,15 +38,174 @@ const invoices = [
   { id: 'INV-2026-006', date: '18 Agu 2026', due: '28 Agu 2026', amount: 'Rp149.000', status: 'Lunas' },
 ]
 
+const dashboardMenuItems = [
+  { id: 'dashboard', label: 'Ringkasan', icon: LayoutDashboard },
+  { id: 'orders', label: 'Order', icon: ShoppingCart },
+  { id: 'support', label: 'Dukungan', icon: LifeBuoy },
+  { id: 'services', label: 'Layanan', icon: PackagePlus },
+  { id: 'invoices', label: 'Tagihan', icon: FileText },
+  { id: 'emails', label: 'Email', icon: Mail },
+  { id: 'wallet', label: 'Dompet', icon: Wallet },
+  { id: 'news', label: 'Berita', icon: Newspaper },
+  { id: 'knowledge-base', label: 'Pusat Bantuan', icon: BookOpen },
+]
+
+const serviceOrders = [
+  { id: '#3', product: 'Cloud Team', price: 'Rp990.000 / tahun', due: '-', status: 'Menunggu setup' },
+  { id: '#2', product: 'Cloud Personal', price: 'Rp149.000 / bulan', due: '-', status: 'Menunggu setup' },
+  { id: '#1', product: 'Cloud Personal', price: 'Rp149.000 / bulan', due: '27 Okt 2027', status: 'Aktif' },
+]
+
+const supportArticles = [
+  { category: 'Akun & keamanan', title: 'Cara mengamankan akun Sangatta Cloud', readTime: '3 menit baca' },
+  { category: 'Layanan', title: 'Mengelola dan memperpanjang layanan', readTime: '4 menit baca' },
+  { category: 'Pembayaran', title: 'Metode pembayaran dan status tagihan', readTime: '2 menit baca' },
+]
+
 function ClientDashboardPage() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [notice, setNotice] = useState('')
-  const menuItems = [
-    { label: 'Ringkasan', href: '#dashboard', icon: LayoutDashboard },
-    { label: 'Layanan', href: '#services', icon: Cloud },
-    { label: 'Tagihan', href: '#invoices', icon: FileText },
-    { label: 'Dukungan', href: '#support', icon: LifeBuoy },
-  ]
+  const [activePage, setActivePage] = useState('dashboard')
+  const [invoiceFilter, setInvoiceFilter] = useState('Menunggu')
+  const [articleQuery, setArticleQuery] = useState('')
+
+  const openPage = (page) => {
+    setActivePage(page)
+    setMenuOpen(false)
+    setNotice('')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  const renderMenuPage = () => {
+    if (activePage === 'orders') {
+      return (
+        <section className="dashboard-page-panel">
+          <div className="dashboard-page-heading">
+            <div><span className="dashboard-section-kicker">PESANAN</span><h2>Mulai order baru</h2><p>Pilih produk, atur layanan, lalu lanjutkan ke pembayaran.</p></div>
+          </div>
+          <div className="dashboard-order-steps">
+            {[
+              ['Pilih produk', '3 produk tersedia', PackagePlus],
+              ['Konfigurasi produk', 'Sesuaikan kebutuhan layanan', Settings2],
+              ['Keranjang', '1 item dalam keranjang', ShoppingCart],
+              ['Pembayaran', 'Pilih metode pembayaran', CreditCard],
+            ].map(([title, detail, Icon], index) => (
+              <button className="dashboard-order-step" type="button" key={title} onClick={() => setNotice('Langkah pemesanan akan terhubung ke FossBilling.')}>
+                <Icon size={18} />
+                <span><strong>{title}</strong><small>{detail}</small></span>
+                {index === 0 && <span className="dashboard-step-count">3 produk</span>}
+                <ChevronRight className="dashboard-step-chevron" size={16} />
+              </button>
+            ))}
+          </div>
+          <p className="dashboard-powered-by">Proses pemesanan akan menggunakan sistem FossBilling.</p>
+        </section>
+      )
+    }
+
+    if (activePage === 'support') {
+      return (
+        <section className="dashboard-page-panel">
+          <div className="dashboard-page-heading dashboard-page-heading-action">
+            <div><span className="dashboard-section-kicker">BANTUAN PELANGGAN</span><h2>Tiket dukungan</h2><p>Ada pertanyaan? Tim kami siap membantu.</p></div>
+            <button className="dashboard-primary-action" type="button" onClick={() => setNotice('Pembuatan tiket dukungan akan tersedia setelah API FossBilling terhubung.')}><LifeBuoy size={16} /> Tiket baru</button>
+          </div>
+          <div className="dashboard-empty-state"><span><LifeBuoy size={22} /></span><strong>Belum ada tiket dukungan</strong><p>Tiket yang kamu buat akan muncul di halaman ini.</p></div>
+        </section>
+      )
+    }
+
+    if (activePage === 'services') {
+      return (
+        <section className="dashboard-page-panel">
+          <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">AKUN PELANGGAN</span><h2>Layanan</h2><p>Kelola layanan dan lihat jadwal perpanjanganmu.</p></div></div>
+          <div className="dashboard-table-wrap dashboard-wide-table">
+            <table>
+              <thead><tr><th>ORDER</th><th>PRODUK / LAYANAN</th><th>HARGA</th><th>JATUH TEMPO</th><th>STATUS</th><th>AKSI</th></tr></thead>
+              <tbody>{serviceOrders.map((service) => (
+                <tr key={service.id}>
+                  <td><button className="dashboard-text-action" type="button" onClick={() => setNotice(`Detail order ${service.id} akan tersedia setelah API FossBilling terhubung.`)}>{service.id}</button></td>
+                  <td>{service.product}</td><td>{service.price}</td><td>{service.due}</td>
+                  <td><span className={`dashboard-status ${service.status === 'Aktif' ? 'status-active' : 'status-pending'}`}><i />{service.status}</span></td>
+                  <td><button className="dashboard-outline-action" type="button" onClick={() => setNotice(`Pengelolaan ${service.product} akan tersedia setelah API FossBilling terhubung.`)}>Kelola</button></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </section>
+      )
+    }
+
+    if (activePage === 'invoices') {
+      const filterStatuses = ['Menunggu', 'Lunas', 'Dikembalikan', 'Dibatalkan']
+      const filteredInvoices = invoices.filter((invoice) => invoice.status === invoiceFilter)
+      return (
+        <section className="dashboard-page-panel">
+          <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Tagihan</h2><p>Lihat status dan riwayat tagihan akunmu.</p></div></div>
+          <div className="dashboard-filter-tabs" role="tablist" aria-label="Filter tagihan">
+            {filterStatuses.map((status) => <button type="button" role="tab" aria-selected={invoiceFilter === status} className={invoiceFilter === status ? 'dashboard-filter-active' : ''} key={status} onClick={() => setInvoiceFilter(status)}>{status}</button>)}
+          </div>
+          <div className="dashboard-table-wrap dashboard-wide-table">
+            <table>
+              <thead><tr><th>NOMOR</th><th>TANGGAL TAGIHAN</th><th>JATUH TEMPO</th><th>TOTAL</th><th>STATUS</th><th>AKSI</th></tr></thead>
+              <tbody>{filteredInvoices.length ? filteredInvoices.map((invoice) => (
+                <tr key={invoice.id}><td><strong>{invoice.id}</strong></td><td>{invoice.date}</td><td>{invoice.due}</td><td className="invoice-amount">{invoice.amount}</td><td><span className={`dashboard-status ${invoice.status === 'Lunas' ? 'status-paid' : 'status-pending'}`}><i />{invoice.status}</span></td><td><button className="dashboard-outline-action" type="button" onClick={() => setNotice('Detail tagihan akan tersedia setelah API FossBilling terhubung.')}>Lihat</button></td></tr>
+              )) : <tr><td className="dashboard-table-empty" colSpan="6">Belum ada tagihan dengan status ini.</td></tr>}</tbody>
+            </table>
+          </div>
+        </section>
+      )
+    }
+
+    if (activePage === 'emails') {
+      return (
+        <section className="dashboard-page-panel">
+          <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">RIWAYAT AKUN</span><h2>Email</h2><p>Salinan email yang dikirim untuk akunmu akan ditampilkan di sini.</p></div></div>
+          <div className="dashboard-empty-state"><span><Mail size={22} /></span><strong>Belum ada email</strong><p>Email yang kami kirim akan tersedia di sini.</p></div>
+        </section>
+      )
+    }
+
+    if (activePage === 'wallet') {
+      return (
+        <section className="dashboard-page-panel">
+          <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Dompet</h2><p>Saldo akun dan aktivitas transaksi.</p></div></div>
+          <div className="dashboard-wallet-card"><span className="dashboard-stat-icon stat-icon-teal"><Wallet size={19} /></span><span>Saldo akun</span><strong>Rp250.000</strong><small>Saldo contoh · belum tersinkron dengan FossBilling</small><button className="dashboard-primary-action" type="button" onClick={() => setNotice('Penambahan saldo akan tersedia setelah API FossBilling terhubung.')}><CreditCard size={16} /> Tambah saldo</button></div>
+          <div className="dashboard-section-heading dashboard-wallet-heading"><div><span className="dashboard-section-kicker">AKTIVITAS</span><h2>Transaksi terbaru</h2></div></div>
+          <div className="dashboard-transaction-row"><span className="dashboard-transaction-icon"><CreditCard size={17} /></span><span><strong>Pembayaran tagihan INV-2026-012</strong><small>18 Sep 2026</small></span><strong className="dashboard-transaction-amount">− Rp149.000</strong></div>
+          <div className="dashboard-transaction-row"><span className="dashboard-transaction-icon"><Wallet size={17} /></span><span><strong>Pengisian saldo</strong><small>10 Sep 2026</small></span><strong className="dashboard-transaction-credit">+ Rp250.000</strong></div>
+        </section>
+      )
+    }
+
+    if (activePage === 'news') {
+      return (
+        <section className="dashboard-page-panel">
+          <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">PEMBARUAN</span><h2>Berita & pengumuman</h2><p>Informasi terbaru dari Sangatta Cloud.</p></div></div>
+          <div className="dashboard-news-list">
+            {[['Pemeliharaan sistem terjadwal', 'Kami akan melakukan pemeliharaan rutin untuk menjaga layanan tetap optimal.', '20 Okt 2026'], ['Selamat datang di Sangatta Cloud', 'Terima kasih telah menjadi bagian dari ruang digital yang lebih personal.', '1 Okt 2026']].map(([title, description, date]) => (
+              <article className="dashboard-news-item" key={title}><span className="dashboard-news-icon"><Newspaper size={18} /></span><div><span className="dashboard-news-date">{date}</span><h3>{title}</h3><p>{description}</p><button className="dashboard-text-action" type="button" onClick={() => setNotice('Artikel berita akan tersedia setelah konten terhubung ke FossBilling.')}>Baca selengkapnya <ArrowRight size={14} /></button></div></article>
+            ))}
+          </div>
+        </section>
+      )
+    }
+
+    if (activePage === 'knowledge-base') {
+      const visibleArticles = supportArticles.filter((article) => `${article.title} ${article.category}`.toLowerCase().includes(articleQuery.toLowerCase()))
+      return (
+        <section className="dashboard-page-panel">
+          <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">PANDUAN</span><h2>Pusat bantuan</h2><p>Temukan jawaban untuk pertanyaan seputar akun dan layanan.</p></div></div>
+          <label className="dashboard-article-search"><Search size={16} /><input value={articleQuery} onChange={(event) => setArticleQuery(event.target.value)} placeholder="Cari artikel bantuan..." /></label>
+          <div className="dashboard-article-list">{visibleArticles.length ? visibleArticles.map((article) => (
+            <button className="dashboard-article-item" type="button" key={article.title} onClick={() => setNotice('Artikel bantuan akan tersedia setelah konten terhubung ke FossBilling.')}><span className="dashboard-article-icon"><BookOpen size={17} /></span><span><small>{article.category}</small><strong>{article.title}</strong><small>{article.readTime}</small></span><ChevronRight size={17} /></button>
+          )) : <div className="dashboard-table-empty">Tidak ada artikel yang cocok dengan pencarianmu.</div>}</div>
+        </section>
+      )
+    }
+
+    return null
+  }
 
   return (
     <main className="client-dashboard">
@@ -51,25 +216,27 @@ function ClientDashboardPage() {
         </a>
         <p className="dashboard-nav-label">MENU UTAMA</p>
         <nav className="dashboard-nav">
-          {menuItems.map(({ label, href, icon: Icon }, index) => (
-            <a
-              className={`dashboard-nav-link ${index === 0 ? 'dashboard-nav-active' : ''}`}
-              href={href}
+          {dashboardMenuItems.map(({ id, label, icon: Icon }) => (
+            <button
+              className={`dashboard-nav-link ${activePage === id ? 'dashboard-nav-active' : ''}`}
+              type="button"
+              aria-current={activePage === id ? 'page' : undefined}
               key={label}
-              onClick={() => setMenuOpen(false)}
+              onClick={() => openPage(id)}
             >
               <Icon size={18} />
               <span>{label}</span>
-              {label === 'Tagihan' && <span className="dashboard-nav-count">1</span>}
-            </a>
+              {id === 'invoices' && <span className="dashboard-nav-count">1</span>}
+            </button>
           ))}
         </nav>
+        <div className="dashboard-sidebar-balance"><span>Saldo akun</span><strong>Rp250.000</strong></div>
         <div className="dashboard-sidebar-bottom">
           <div className="dashboard-help-card">
             <span className="dashboard-help-icon"><CircleHelp size={19} /></span>
             <strong>Butuh bantuan?</strong>
             <span>Tim kami siap membantu.</span>
-            <a href="#support">Hubungi dukungan <ArrowRight size={13} /></a>
+            <button type="button" onClick={() => openPage('support')}>Hubungi dukungan <ArrowRight size={13} /></button>
           </div>
           <a className="dashboard-nav-link" href="/"><Settings2 size={18} /><span>Beranda website</span></a>
           <a className="dashboard-nav-link dashboard-logout" href="/login"><LogOut size={18} /><span>Keluar</span></a>
@@ -103,13 +270,15 @@ function ClientDashboardPage() {
             <p><strong>Pratinjau dashboard</strong> — data di halaman ini hanya contoh dan belum diambil dari FossBilling.</p>
           </div>
 
+          {activePage === 'dashboard' ? (
+            <>
           <section className="dashboard-welcome">
             <div>
               <span className="dashboard-eyebrow"><Gauge size={14} /> AREA PELANGGAN</span>
               <h1>Selamat datang kembali<span>.</span></h1>
               <p>Ringkasan layanan dan tagihanmu ada di sini.</p>
             </div>
-            <button className="dashboard-primary-action" type="button" onClick={() => setNotice('Pemesanan layanan akan aktif setelah API FossBilling dihubungkan.')}>
+            <button className="dashboard-primary-action" type="button" onClick={() => openPage('orders')}>
               <PackagePlus size={17} /> Pesan layanan
             </button>
           </section>
@@ -139,7 +308,7 @@ function ClientDashboardPage() {
           <section className="dashboard-section" id="services">
             <div className="dashboard-section-heading">
               <div><span className="dashboard-section-kicker">LAYANANMU</span><h2>Layanan aktif</h2></div>
-              <a href="#services">Lihat semua <ArrowRight size={15} /></a>
+              <button type="button" onClick={() => openPage('services')}>Lihat semua <ArrowRight size={15} /></button>
             </div>
             <div className="dashboard-services-grid">
               {services.map((service) => (
@@ -167,7 +336,7 @@ function ClientDashboardPage() {
             <div className="dashboard-panel dashboard-invoices" id="invoices">
               <div className="dashboard-section-heading">
                 <div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Tagihan terbaru</h2></div>
-                <a href="#invoices">Semua tagihan <ArrowRight size={15} /></a>
+                <button type="button" onClick={() => openPage('invoices')}>Semua tagihan <ArrowRight size={15} /></button>
               </div>
               <div className="dashboard-table-wrap">
                 <table>
@@ -201,10 +370,12 @@ function ClientDashboardPage() {
               <article className="dashboard-support-card" id="support">
                 <span className="dashboard-support-icon"><LifeBuoy size={19} /></span>
                 <div><strong>Perlu bantuan?</strong><p>Buat tiket dan tim kami akan segera membantu.</p></div>
-                <button type="button" onClick={() => setNotice('Dukungan pelanggan akan aktif setelah API FossBilling dihubungkan.')}>Hubungi tim <ArrowRight size={14} /></button>
+                <button type="button" onClick={() => openPage('support')}>Hubungi tim <ArrowRight size={14} /></button>
               </article>
             </aside>
           </section>
+            </>
+          ) : renderMenuPage()}
           <footer className="dashboard-footer"><span>Ruang digital yang lebih personal.</span><span><FileText size={13} /> Privasi & keamanan adalah prioritas kami.</span></footer>
         </div>
         {notice && (
