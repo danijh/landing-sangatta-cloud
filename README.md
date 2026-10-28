@@ -45,11 +45,10 @@ npm run build
 | Konten awal halaman Tentang, Kontak, Ketentuan, dan Privasi | `src/InfoPage.jsx` |
 | Konten halaman setelah diedit di panel admin | `/admin` (disimpan di `storage/site-content.json`) |
 
-Halaman `/login`, `/signup`, dan `/dashboard` saat ini merupakan pratinjau UI.
-Form login/pendaftaran dan tombol Google belum terhubung ke autentikasi; data
-yang terlihat di dashboard adalah contoh, bukan data akun atau tagihan nyata.
-API key FossBilling dan OAuth client secret harus tetap disimpan di environment
-server, bukan di frontend.
+Form `/login` dan `/signup` terhubung ke endpoint guest FossBilling melalui
+server PHP. Tombol Google belum terhubung ke OAuth, dan data di `/dashboard`
+masih contoh, bukan data akun atau tagihan nyata. Simpan rahasia integrasi
+FossBilling dan OAuth di environment server, bukan di frontend.
 
 ### Mengubah teks dan bahasa
 
@@ -161,20 +160,59 @@ ke React, URL browser, atau file yang dipublikasikan. Jika kelak server perlu
 memanggil endpoint terproteksi, panggilan harus dibuat dari PHP dan token hanya
 disimpan sebagai environment variable rahasia di server.
 
-Konfigurasikan alamat dasar server FossBilling melalui `FOSSBILLING_BASE_URL`
-(tanpa path `/api/...`) dan mata uang melalui `PRICING_CURRENCY` (default `IDR`).
+Alamat dasar server FossBilling diatur melalui `FOSSBILLING_BASE_URL` (tanpa
+path `/api/...`), dengan default `http://localhost:8086`. Karena itu, saat
+server API lokal tersedia di
+`http://localhost:8086/api/guest/product/get_list`, konfigurasi tambahan tidak
+diperlukan. Mata uang diatur melalui `PRICING_CURRENCY` (default `IDR`).
 HTTPS diwajibkan untuk host publik. HTTP hanya diterima untuk alamat IP private
-atau loopback, agar development dapat mengakses FossBilling di LAN atau API
-Docker yang dipublikasikan hanya ke `127.0.0.1` pada VPS.
+atau host loopback, agar development dapat mengakses FossBilling di LAN atau
+API Docker yang dipublikasikan hanya ke `127.0.0.1` pada VPS.
+
+### Signup dan login pelanggan
+
+Form `/signup` dan `/login` mengirim permintaan POST ke
+`public/api/fossbilling-auth.php`. PHP meneruskan data ke endpoint guest
+FossBilling `/api/guest/client/create` atau `/api/guest/client/login`; alamat
+server diambil dari `FOSSBILLING_BASE_URL`. Sebelum POST, PHP mengambil cookie
+`fossbilling_csrf` dari halaman utama FossBilling (`GET /`) dan meneruskannya
+sebagai header `X-CSRF-Token` pada sesi cURL yang sama. Endpoint system/company
+tidak selalu menerbitkan cookie tersebut. Signup mengirim
+`first_name`, `last_name`, `email`, `password`, dan `password_confirm`; login
+mengirim `email` dan `password`. Kredensial pengguna tidak dikirim langsung
+dari browser ke server FossBilling. Endpoint lokal juga menggunakan sesi PHP,
+token CSRF lokal, batas percobaan login, dan validasi input. PHP cURL harus
+tersedia di server.
+Respons sukses diteruskan sebagai `result: true`; setelah login atau pendaftaran
+berhasil, halaman menampilkan transisi singkat sebelum membuka `/dashboard`.
+Pesan error FossBilling dipakai untuk menampilkan panduan yang sesuai di form.
+
+Saat login sukses, backend menyimpan cookie `fossbilling_session` dan
+`fossbilling_csrf` di session PHP; cookie FossBilling tidak dikirim ke browser.
+Saat halaman Profil dibuka, backend memanggil
+`/api/client/profile/get`, memeriksa ID profil terhadap ID client dari hasil
+login, lalu hanya mengembalikan field profil yang diizinkan. Pembaruan memakai
+POST `/api/client/profile/update` dengan field profil yang diizinkan saja;
+backend membaca profil milik session sebelum dan sesudah update. ID client,
+role, currency, dan field lain yang tidak dapat diedit tidak diterima dari
+formulir. Input divalidasi di browser dan divalidasi ulang di backend. Formulir
+mengirim semua field yang dapat diedit, bukan hanya field yang berubah, agar
+nilai profil yang tidak disentuh tetap eksplisit.
+
+Endpoint `/api/admin/*/get_list` di `img-sample/endpoint-fossbilling.txt` adalah
+endpoint administrator dan tidak digunakan untuk data client. Akses profile
+melalui endpoint backend lokal membantu mencegah BOLA/IDOR: browser tidak dapat
+memilih ID client, dan respons FossBilling harus cocok dengan ID pemilik session.
 
 Untuk development lokal, jalankan API PHP dengan konfigurasi berikut:
 
 ```sh
-FOSSBILLING_BASE_URL=http://192.168.1.22:8085 PRICING_CURRENCY=IDR npm run dev:api
+FOSSBILLING_BASE_URL=http://192.168.1.22:8085 npm run dev:api
 ```
 
-`npm run dev` menjalankan frontend secara terpisah. Vite meneruskan `/api` ke
-server PHP lokal di port 8001.
+Gunakan perintah tersebut hanya jika API berjalan pada alamat lain; nilai
+default adalah `http://localhost:8086`. `npm run dev` menjalankan frontend
+secara terpisah. Vite meneruskan `/api` ke server PHP lokal di port 8001.
 
 ### Menambahkan fitur paket
 

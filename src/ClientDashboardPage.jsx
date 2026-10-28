@@ -22,10 +22,11 @@ import {
   ShoppingCart,
   Settings2,
   ShieldCheck,
+  UserRound,
   Wallet,
   X,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 const services = [
   { name: 'Cloud Personal', detail: 'Penyimpanan privat', used: '24 GB', total: '100 GB', progress: 24, next: '26 Nov 2026' },
@@ -68,6 +69,77 @@ function ClientDashboardPage() {
   const [activePage, setActivePage] = useState('dashboard')
   const [invoiceFilter, setInvoiceFilter] = useState('Menunggu')
   const [articleQuery, setArticleQuery] = useState('')
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [profileTab, setProfileTab] = useState('details')
+  const [authState, setAuthState] = useState('loading')
+  const [authError, setAuthError] = useState('')
+  const [csrfToken, setCsrfToken] = useState('')
+  const [client, setClient] = useState({})
+  const [profile, setProfile] = useState(null)
+  const [profileState, setProfileState] = useState('idle')
+  const [profileError, setProfileError] = useState('')
+  const [profileLoadAttempt, setProfileLoadAttempt] = useState(0)
+  const [isSavingProfile, setIsSavingProfile] = useState(false)
+  const [isLoggingOut, setIsLoggingOut] = useState(false)
+
+  useEffect(() => {
+    const controller = new AbortController()
+
+    fetch('/api/fossbilling-auth.php?action=status', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json()
+        if (!response.ok || typeof result.authenticated !== 'boolean' || typeof result.csrfToken !== 'string') {
+          throw new Error(result.error || 'Sesi akun tidak dapat diverifikasi.')
+        }
+        if (!result.authenticated) {
+          window.location.replace('/login')
+          return
+        }
+        setClient(result.client || {})
+        setCsrfToken(result.csrfToken)
+        setAuthState('authenticated')
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setAuthError(error.message || 'Sesi akun tidak dapat diverifikasi.')
+          setAuthState('error')
+        }
+      })
+
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    if (authState !== 'authenticated' || activePage !== 'profile') return undefined
+
+    const controller = new AbortController()
+    setProfileState('loading')
+    setProfileError('')
+
+    fetch('/api/fossbilling-auth.php?action=profile', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json()
+        if (!response.ok || !result.profile || typeof result.profile !== 'object') {
+          throw new Error(result.error || 'Profil tidak dapat dimuat.')
+        }
+        setProfile(result.profile)
+        setProfileState('loaded')
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setProfileError(error.message || 'Profil tidak dapat dimuat.')
+          setProfileState('error')
+        }
+      })
+
+    return () => controller.abort()
+  }, [activePage, authState, profileLoadAttempt])
 
   const openPage = (page) => {
     setActivePage(page)
@@ -76,7 +148,150 @@ function ClientDashboardPage() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
+  const customerName = profile?.name
+    || [profile?.first_name, profile?.last_name].filter(Boolean).join(' ')
+    || client.name
+    || [client.first_name, client.last_name].filter(Boolean).join(' ')
+    || (profile?.email || client.email)?.split('@')[0]
+    || 'Pelanggan'
+  const customerInitials = customerName
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join('')
+    .toUpperCase()
+
+  const handleLogout = async () => {
+    setIsLoggingOut(true)
+    setNotice('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'X-CSRF-Token': csrfToken,
+        },
+      })
+      const result = await response.json()
+      if (!response.ok || result.result !== true || result.error !== null) {
+        throw new Error(result.error || 'Tidak dapat mengakhiri sesi. Coba lagi.')
+      }
+      window.location.replace('/login')
+    } catch (error) {
+      setNotice(error.message || 'Tidak dapat mengakhiri sesi. Coba lagi.')
+      setIsLoggingOut(false)
+      setAccountMenuOpen(false)
+    }
+  }
+
+  const handleProfileUpdate = async (event) => {
+    event.preventDefault()
+    setIsSavingProfile(true)
+    setNotice('')
+    try {
+      const formData = new FormData(event.currentTarget)
+      const payload = Object.fromEntries(formData.entries())
+      payload.phone_cc = typeof profile?.phone_cc === 'string' ? profile.phone_cc : ''
+      const response = await fetch('/api/fossbilling-auth.php?action=profile-update', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+        body: JSON.stringify(payload),
+      })
+      const result = await response.json()
+      if (!response.ok || !result.profile || typeof result.profile !== 'object') {
+        throw new Error(result.error || 'Profil tidak dapat diperbarui.')
+      }
+      setProfile(result.profile)
+      setClient((current) => ({ ...current, ...result.profile }))
+      setNotice('Profil berhasil diperbarui.')
+    } catch (error) {
+      setNotice(error.message || 'Profil tidak dapat diperbarui.')
+    } finally {
+      setIsSavingProfile(false)
+    }
+  }
+
+  const handlePasswordUpdate = (event) => {
+    event.preventDefault()
+    const formData = new FormData(event.currentTarget)
+    const password = formData.get('new_password')
+    if (password !== formData.get('password_confirm')) {
+      setNotice('Konfirmasi kata sandi baru belum sama.')
+      return
+    }
+    setNotice('Kata sandi belum diubah. Fitur ini akan tersedia setelah endpoint perubahan password FossBilling dihubungkan.')
+  }
+
   const renderMenuPage = () => {
+    if (activePage === 'profile') {
+      return (
+        <section className="dashboard-page-panel dashboard-profile-page">
+          <div className="dashboard-page-heading">
+            <div className="dashboard-breadcrumb"><button type="button" onClick={() => openPage('dashboard')}>Ringkasan</button><span>/</span><strong>Profil</strong></div>
+          </div>
+          <div className="dashboard-profile-tabs" role="tablist" aria-label="Pengaturan profil">
+            <button type="button" role="tab" aria-selected={profileTab === 'details'} className={profileTab === 'details' ? 'dashboard-profile-tab-active' : ''} onClick={() => setProfileTab('details')}>Detail</button>
+            <button type="button" role="tab" aria-selected={profileTab === 'password'} className={profileTab === 'password' ? 'dashboard-profile-tab-active' : ''} onClick={() => setProfileTab('password')}>Ganti password</button>
+          </div>
+          {profileTab === 'details' && profileState === 'loading' ? (
+            <div className="dashboard-profile-loading" role="status">Memuat detail profil...</div>
+          ) : profileTab === 'details' && profileState === 'error' ? (
+            <div className="dashboard-profile-load-error" role="alert">
+              <p>{profileError}</p>
+              <button type="button" className="dashboard-profile-retry" onClick={() => setProfileLoadAttempt((attempt) => attempt + 1)}>Coba lagi</button>
+            </div>
+          ) : profileTab === 'details' && profile ? (
+            <form className="dashboard-profile-form" onSubmit={handleProfileUpdate}>
+              <div className="dashboard-profile-form-heading">
+                <h2>Perbarui detail</h2>
+                <p>Jaga agar informasi pribadimu selalu terbaru.</p>
+              </div>
+              <div className="dashboard-profile-avatar-row">
+                <span className="dashboard-avatar dashboard-avatar-large">{customerInitials}</span>
+                <span>Avatar ditampilkan berdasarkan identitas akunmu.</span>
+              </div>
+              <div className="dashboard-profile-fields">
+                <label className="dashboard-profile-field"><span>Nama depan <b>*</b></span><input name="first_name" defaultValue={profile.first_name || ''} required maxLength={100} /></label>
+                <label className="dashboard-profile-field"><span>Nama belakang</span><input name="last_name" defaultValue={profile.last_name || ''} maxLength={100} /></label>
+                <label className="dashboard-profile-field"><span>Email <b>*</b></span><input name="email" type="email" defaultValue={profile.email || ''} required maxLength={254} /></label>
+                <label className="dashboard-profile-field"><span>Nomor telepon</span><input name="phone" type="tel" defaultValue={profile.phone || ''} placeholder="Nomor telepon" maxLength={32} pattern="[+0-9() .-]+" /></label>
+                <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Email tagihan</span><input name="billing_email" type="email" defaultValue={profile.billing_email || ''} maxLength={254} /><small>Pemberitahuan tagihan dikirim ke alamat ini. Biarkan kosong untuk memakai email akun.</small></label>
+                <label className="dashboard-profile-field"><span>Tanggal lahir</span><input name="birthday" type="date" defaultValue={typeof profile.birthday === 'string' && /^\d{4}-\d{2}-\d{2}/.test(profile.birthday) ? profile.birthday.slice(0, 10) : ''} /></label>
+                <label className="dashboard-profile-field"><span>Jenis kelamin</span><select name="gender" defaultValue={profile.gender || ''}><option value="">Pilih</option><option value="female">Perempuan</option><option value="male">Laki-laki</option><option value="other">Lainnya</option></select></label>
+                <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Nama perusahaan</span><input name="company" defaultValue={profile.company || ''} maxLength={255} /></label>
+                <label className="dashboard-profile-field"><span>NPWP perusahaan</span><input name="company_vat" defaultValue={profile.company_vat || ''} maxLength={64} /></label>
+                <label className="dashboard-profile-field"><span>Nomor perusahaan</span><input name="company_number" defaultValue={profile.company_number || ''} maxLength={64} /></label>
+                <label className="dashboard-profile-field"><span>Alamat</span><input name="address_1" defaultValue={profile.address_1 || ''} maxLength={255} /></label>
+                <label className="dashboard-profile-field"><span>Alamat 2</span><input name="address_2" defaultValue={profile.address_2 || ''} maxLength={255} /></label>
+                <label className="dashboard-profile-field"><span>Kota</span><input name="city" defaultValue={profile.city || ''} maxLength={100} /></label>
+                <label className="dashboard-profile-field"><span>Negara (kode)</span><input name="country" defaultValue={profile.country || ''} placeholder="ID" maxLength={2} pattern="[A-Za-z]{2}" /></label>
+                <label className="dashboard-profile-field"><span>Provinsi</span><input name="state" defaultValue={profile.state || ''} maxLength={100} /></label>
+                <label className="dashboard-profile-field"><span>Kode pos</span><input name="postcode" defaultValue={profile.postcode || ''} maxLength={32} /></label>
+                <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Zona waktu</span><select name="timezone" defaultValue={profile.timezone || 'Asia/Makassar'}>{profile.timezone && !['Asia/Makassar', 'Asia/Jakarta', 'Asia/Jayapura', 'UTC'].includes(profile.timezone) && <option value={profile.timezone}>{profile.timezone}</option>}<option value="Asia/Makassar">Asia/Makassar</option><option value="Asia/Jakarta">Asia/Jakarta</option><option value="Asia/Jayapura">Asia/Jayapura</option><option value="UTC">UTC</option></select><small>Digunakan untuk menampilkan tanggal dan waktu lokal.</small></label>
+              </div>
+              <button className="dashboard-primary-action" type="submit" disabled={isSavingProfile}>{isSavingProfile ? 'Menyimpan...' : <><UserRound size={15} /> Perbarui profil</>}</button>
+            </form>
+          ) : profileTab === 'password' ? (
+            <form className="dashboard-password-form" onSubmit={handlePasswordUpdate}>
+              <div className="dashboard-profile-form-heading">
+                <h2>Ganti password</h2>
+                <p>Gunakan password yang kuat dan belum pernah dipakai sebelumnya.</p>
+              </div>
+              <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Password saat ini <b>*</b></span><input name="current_password" type="password" autoComplete="current-password" required /></label>
+              <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Password baru <b>*</b></span><input name="new_password" type="password" autoComplete="new-password" minLength={8} required /><small>Gunakan minimal 8 karakter.</small></label>
+              <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Konfirmasi password baru <b>*</b></span><input name="password_confirm" type="password" autoComplete="new-password" minLength={8} required /></label>
+              <button className="dashboard-primary-action" type="submit"><ShieldCheck size={15} /> Simpan password</button>
+              <p className="dashboard-profile-api-note">Password tidak dikirim atau disimpan sampai API perubahan password FossBilling tersedia.</p>
+            </form>
+          ) : null}
+        </section>
+      )
+    }
+
     if (activePage === 'orders') {
       return (
         <section className="dashboard-page-panel">
@@ -207,6 +422,14 @@ function ClientDashboardPage() {
     return null
   }
 
+  if (authState === 'loading') {
+    return <main className="auth-loading-screen" role="status"><div className="auth-loading-card"><span className="auth-loading-mark"><Cloud size={26} /></span><span className="auth-card-kicker">AREA PELANGGAN</span><h1>Memeriksa sesi akun</h1><p>Menyiapkan dashboard pribadimu...</p></div></main>
+  }
+
+  if (authState === 'error') {
+    return <main className="auth-loading-screen"><div className="auth-loading-card"><span className="auth-loading-mark"><ShieldCheck size={26} /></span><span className="auth-card-kicker">AREA PELANGGAN</span><h1>Sesi belum dapat diverifikasi</h1><p>{authError}</p><a className="dashboard-outline-action" href="/login">Kembali ke login</a><button className="dashboard-profile-retry" type="button" onClick={() => window.location.reload()}>Coba lagi</button></div></main>
+  }
+
   return (
     <main className="client-dashboard">
       <aside className={`dashboard-sidebar ${menuOpen ? 'dashboard-sidebar-open' : ''}`}>
@@ -239,7 +462,6 @@ function ClientDashboardPage() {
             <button type="button" onClick={() => openPage('support')}>Hubungi dukungan <ArrowRight size={13} /></button>
           </div>
           <a className="dashboard-nav-link" href="/"><Settings2 size={18} /><span>Beranda website</span></a>
-          <a className="dashboard-nav-link dashboard-logout" href="/login"><LogOut size={18} /><span>Keluar</span></a>
           <p className="dashboard-sidebar-copy">© 2026 Sangatta Cloud</p>
         </div>
       </aside>
@@ -257,11 +479,27 @@ function ClientDashboardPage() {
           <button className="dashboard-icon-button" type="button" onClick={() => setNotice('Notifikasi akan tersedia setelah dashboard terhubung ke FossBilling.')} aria-label="Notifikasi">
             <Bell size={18} /><span />
           </button>
-          <button className="dashboard-account" type="button" onClick={() => setNotice('Menu akun akan aktif setelah data profil terhubung.')}>
-            <span className="dashboard-avatar">SC</span>
-            <span className="dashboard-account-copy"><strong>Nama Pelanggan</strong><small>Akun pelanggan</small></span>
-            <ChevronDown size={15} />
-          </button>
+          <div className="dashboard-account-menu-wrap" onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) setAccountMenuOpen(false)
+          }} onKeyDown={(event) => {
+            if (event.key === 'Escape') setAccountMenuOpen(false)
+          }}>
+            <button className="dashboard-account" type="button" aria-haspopup="menu" aria-expanded={accountMenuOpen} onClick={() => setAccountMenuOpen((open) => !open)}>
+              <span className="dashboard-avatar">{customerInitials}</span>
+              <span className="dashboard-account-copy"><strong>{customerName}</strong><small>Akun pelanggan</small></span>
+              <ChevronDown size={15} />
+            </button>
+            {accountMenuOpen && (
+              <div className="dashboard-account-menu" role="menu">
+                <button type="button" role="menuitem" onClick={() => {
+                  setProfileTab('details')
+                  setAccountMenuOpen(false)
+                  openPage('profile')
+                }}><UserRound size={15} /> Profil</button>
+                <button type="button" role="menuitem" className="dashboard-account-menu-logout" onClick={handleLogout} disabled={isLoggingOut}><LogOut size={15} /> {isLoggingOut ? 'Keluar...' : 'Logout'}</button>
+              </div>
+            )}
+          </div>
         </header>
 
         <div className="dashboard-content">
