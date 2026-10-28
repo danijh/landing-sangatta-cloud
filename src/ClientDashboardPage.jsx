@@ -28,6 +28,12 @@ import {
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 
+const countryCodes = 'AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'.split(' ')
+const countryNames = new Intl.DisplayNames(['id'], { type: 'region' })
+const countryOptions = countryCodes
+  .map((code) => ({ code, name: countryNames.of(code) || code }))
+  .sort((a, b) => a.code === 'ID' ? -1 : b.code === 'ID' ? 1 : a.name.localeCompare(b.name, 'id'))
+
 const services = [
   { name: 'Cloud Personal', detail: 'Penyimpanan privat', used: '24 GB', total: '100 GB', progress: 24, next: '26 Nov 2026' },
   { name: 'Cloud Team', detail: 'Ruang kerja bersama', used: '68 GB', total: '250 GB', progress: 27, next: '12 Des 2026' },
@@ -268,7 +274,7 @@ function ClientDashboardPage() {
                 <label className="dashboard-profile-field"><span>Alamat</span><input name="address_1" defaultValue={profile.address_1 || ''} maxLength={255} /></label>
                 <label className="dashboard-profile-field"><span>Alamat 2</span><input name="address_2" defaultValue={profile.address_2 || ''} maxLength={255} /></label>
                 <label className="dashboard-profile-field"><span>Kota</span><input name="city" defaultValue={profile.city || ''} maxLength={100} /></label>
-                <label className="dashboard-profile-field"><span>Negara (kode)</span><input name="country" defaultValue={profile.country || ''} placeholder="ID" maxLength={2} pattern="[A-Za-z]{2}" /></label>
+                <label className="dashboard-profile-field"><span>Negara</span><select name="country" defaultValue={countryCodes.includes(profile.country?.toUpperCase()) ? profile.country.toUpperCase() : 'ID'}><option value="ID">Indonesia</option>{countryOptions.filter(({ code }) => code !== 'ID').map(({ code, name }) => <option key={code} value={code}>{name}</option>)}</select></label>
                 <label className="dashboard-profile-field"><span>Provinsi</span><input name="state" defaultValue={profile.state || ''} maxLength={100} /></label>
                 <label className="dashboard-profile-field"><span>Kode pos</span><input name="postcode" defaultValue={profile.postcode || ''} maxLength={32} /></label>
                 <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Zona waktu</span><select name="timezone" defaultValue={profile.timezone || 'Asia/Makassar'}>{profile.timezone && !['Asia/Makassar', 'Asia/Jakarta', 'Asia/Jayapura', 'UTC'].includes(profile.timezone) && <option value={profile.timezone}>{profile.timezone}</option>}<option value="Asia/Makassar">Asia/Makassar</option><option value="Asia/Jakarta">Asia/Jakarta</option><option value="Asia/Jayapura">Asia/Jayapura</option><option value="UTC">UTC</option></select><small>Digunakan untuk menampilkan tanggal dan waktu lokal.</small></label>
