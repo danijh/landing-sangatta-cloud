@@ -86,6 +86,7 @@ function ClientDashboardPage() {
   const [profileError, setProfileError] = useState('')
   const [profileLoadAttempt, setProfileLoadAttempt] = useState(0)
   const [isSavingProfile, setIsSavingProfile] = useState(false)
+  const [isChangingPassword, setIsChangingPassword] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
 
   useEffect(() => {
@@ -221,15 +222,69 @@ function ClientDashboardPage() {
     }
   }
 
-  const handlePasswordUpdate = (event) => {
+  const handlePasswordUpdate = async (event) => {
     event.preventDefault()
-    const formData = new FormData(event.currentTarget)
-    const password = formData.get('new_password')
-    if (password !== formData.get('password_confirm')) {
-      setNotice('Konfirmasi kata sandi baru belum sama.')
+    const form = event.currentTarget
+    const formData = new FormData(form)
+    const currentPassword = formData.get('current_password')
+    const newPassword = formData.get('new_password')
+    const confirmPassword = formData.get('confirm_password')
+
+    if (
+      typeof currentPassword !== 'string'
+      || typeof newPassword !== 'string'
+      || typeof confirmPassword !== 'string'
+    ) {
+      setNotice('Data password tidak valid.')
       return
     }
-    setNotice('Kata sandi belum diubah. Fitur ini akan tersedia setelah endpoint perubahan password FossBilling dihubungkan.')
+    if (newPassword.length < 8) {
+      setNotice('Password baru harus terdiri dari minimal 8 karakter.')
+      return
+    }
+    if (!/[A-Z]/.test(newPassword) || !/[a-z]/.test(newPassword) || !/[^A-Za-z0-9]/.test(newPassword)) {
+      setNotice('Password baru harus memiliki minimal 1 huruf uppercase, 1 huruf lowercase, dan 1 simbol.')
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      setNotice('Konfirmasi password baru belum sama.')
+      return
+    }
+
+    setIsChangingPassword(true)
+    setNotice('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=password-change', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+          confirm_password: confirmPassword,
+        }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!result || typeof result !== 'object') {
+        throw new Error('Respons server tidak valid. Periksa konfigurasi endpoint API.')
+      }
+      if (!response.ok || result.result !== true || result.error !== null) {
+        throw new Error(
+          typeof result.error === 'string' && result.error
+            ? result.error
+            : 'Password tidak dapat diperbarui. Silakan coba lagi.',
+        )
+      }
+      form.reset()
+      setNotice('Password berhasil diperbarui.')
+    } catch (error) {
+      setNotice(error.message || 'Password tidak dapat diperbarui. Silakan coba lagi.')
+    } finally {
+      setIsChangingPassword(false)
+    }
   }
 
   const renderMenuPage = () => {
@@ -288,10 +343,10 @@ function ClientDashboardPage() {
                 <p>Gunakan password yang kuat dan belum pernah dipakai sebelumnya.</p>
               </div>
               <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Password saat ini <b>*</b></span><input name="current_password" type="password" autoComplete="current-password" required /></label>
-              <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Password baru <b>*</b></span><input name="new_password" type="password" autoComplete="new-password" minLength={8} required /><small>Gunakan minimal 8 karakter.</small></label>
-              <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Konfirmasi password baru <b>*</b></span><input name="password_confirm" type="password" autoComplete="new-password" minLength={8} required /></label>
-              <button className="dashboard-primary-action" type="submit"><ShieldCheck size={15} /> Simpan password</button>
-              <p className="dashboard-profile-api-note">Password tidak dikirim atau disimpan sampai API perubahan password FossBilling tersedia.</p>
+              <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Password baru <b>*</b></span><input name="new_password" type="password" autoComplete="new-password" minLength={8} required /><small>Minimal 8 karakter, dengan 1 huruf uppercase, 1 huruf lowercase, dan 1 simbol.</small></label>
+              <label className="dashboard-profile-field dashboard-profile-field-wide"><span>Konfirmasi password baru <b>*</b></span><input name="confirm_password" type="password" autoComplete="new-password" minLength={8} required /></label>
+              <button className="dashboard-primary-action" type="submit" disabled={isChangingPassword}>{isChangingPassword ? 'Menyimpan...' : <><ShieldCheck size={15} /> Simpan password</>}</button>
+              <p className="dashboard-profile-api-note">Password baru harus memenuhi semua kriteria sebelum disimpan.</p>
             </form>
           ) : null}
         </section>

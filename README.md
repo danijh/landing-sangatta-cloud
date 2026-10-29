@@ -199,6 +199,14 @@ formulir. Input divalidasi di browser dan divalidasi ulang di backend. Formulir
 mengirim semua field yang dapat diedit, bukan hanya field yang berubah, agar
 nilai profil yang tidak disentuh tetap eksplisit.
 
+Ganti password mengirim `current_password`, `new_password`, dan
+`confirm_password` ke action lokal
+`/api/fossbilling-auth.php?action=password-change`. Backend memvalidasi
+password, lalu meneruskan permintaan melalui sesi FossBilling ke
+`/api/client/profile/change_password`. Pastikan route
+`/api/fossbilling-auth.php` dijalankan oleh PHP-FPM pada konfigurasi web server;
+contohnya tersedia di `deploy/nginx/sangatta-cloud.conf.example`.
+
 Endpoint `/api/admin/*/get_list` di `img-sample/endpoint-fossbilling.txt` adalah
 endpoint administrator dan tidak digunakan untuk data client. Akses profile
 melalui endpoint backend lokal membantu mencegah BOLA/IDOR: browser tidak dapat

@@ -531,7 +531,7 @@ if ($action === 'profile' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
-if (!in_array($action, ['login', 'create', 'logout', 'profile-update'], true)
+if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change'], true)
     || $_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(['error' => 'Permintaan tidak valid.'], 405);
 }
@@ -540,7 +540,7 @@ if (!csrfIsValid()) {
     respond(['error' => 'Sesi kedaluwarsa. Muat ulang halaman lalu coba lagi.'], 403);
 }
 
-if (in_array($action, ['logout', 'profile-update'], true)
+if (in_array($action, ['logout', 'profile-update', 'password-change'], true)
     && empty($_SESSION['fossbilling_authenticated'])) {
     respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
 }
@@ -561,6 +561,49 @@ if ($action === 'logout') {
 }
 
 try {
+    if ($action === 'password-change') {
+        $rawBody = file_get_contents('php://input');
+        if ($rawBody === false || strlen($rawBody) > 8192) {
+            respond(['error' => 'Permintaan terlalu besar.'], 413);
+        }
+        $input = json_decode($rawBody ?: '', true, 16, JSON_THROW_ON_ERROR);
+        if (!is_array($input)) {
+            respond(['error' => 'Format data tidak valid.'], 400);
+        }
+
+        $allowedFields = ['current_password', 'new_password', 'confirm_password'];
+        if (array_diff(array_keys($input), $allowedFields) !== []) {
+            respond(['error' => 'Permintaan berisi field yang tidak didukung.'], 422);
+        }
+        $currentPassword = $input['current_password'] ?? null;
+        $newPassword = $input['new_password'] ?? null;
+        $confirmPassword = $input['confirm_password'] ?? null;
+        if (!is_string($currentPassword) || $currentPassword === '' || strlen($currentPassword) > 4096
+            || !is_string($newPassword) || strlen($newPassword) > 4096
+            || !is_string($confirmPassword) || strlen($confirmPassword) > 4096) {
+            respond(['error' => 'Data password tidak valid.'], 422);
+        }
+        if (strlen($newPassword) < 8
+            || preg_match('/[A-Z]/', $newPassword) !== 1
+            || preg_match('/[a-z]/', $newPassword) !== 1
+            || preg_match('/[^A-Za-z0-9]/', $newPassword) !== 1) {
+            respond(['error' => 'Password baru harus minimal 8 karakter dan memiliki huruf uppercase, huruf lowercase, serta simbol.'], 422);
+        }
+        if (!hash_equals($newPassword, $confirmPassword)) {
+            respond(['error' => 'Konfirmasi password baru belum sama.'], 422);
+        }
+
+        $result = callFossBillingClient('change_password', [
+            'current_password' => $currentPassword,
+            'new_password' => $newPassword,
+            'confirm_password' => $confirmPassword,
+        ]);
+        if (($result['result'] ?? null) !== true) {
+            throw new RuntimeException('FossBilling returned an unexpected password update response.');
+        }
+        respond(['result' => true, 'error' => null]);
+    }
+
     if ($action === 'profile-update') {
         $rawBody = file_get_contents('php://input');
         if ($rawBody === false || strlen($rawBody) > 16384) {
