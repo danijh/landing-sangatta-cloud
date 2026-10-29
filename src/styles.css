@@ -3555,6 +3555,26 @@ a {
   text-align: center;
 }
 
+.dashboard-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  color: #89979d;
+  font-size: 9px;
+}
+
+.dashboard-pagination > div {
+  display: flex;
+  gap: 7px;
+}
+
+.dashboard-pagination .dashboard-outline-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .dashboard-filter-tabs {
   display: flex;
   gap: 5px;

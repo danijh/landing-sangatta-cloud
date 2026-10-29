@@ -57,17 +57,30 @@ const dashboardMenuItems = [
   { id: 'knowledge-base', label: 'Pusat Bantuan', icon: BookOpen },
 ]
 
-const serviceOrders = [
-  { id: '#3', product: 'Cloud Team', price: 'Rp990.000 / tahun', due: '-', status: 'Menunggu setup' },
-  { id: '#2', product: 'Cloud Personal', price: 'Rp149.000 / bulan', due: '-', status: 'Menunggu setup' },
-  { id: '#1', product: 'Cloud Personal', price: 'Rp149.000 / bulan', due: '27 Okt 2027', status: 'Aktif' },
-]
-
 const supportArticles = [
   { category: 'Akun & keamanan', title: 'Cara mengamankan akun Sangatta Cloud', readTime: '3 menit baca' },
   { category: 'Layanan', title: 'Mengelola dan memperpanjang layanan', readTime: '4 menit baca' },
   { category: 'Pembayaran', title: 'Metode pembayaran dan status tagihan', readTime: '2 menit baca' },
 ]
+
+function formatCompactPrice(price) {
+  const amount = typeof price === 'number' ? price : Number(price)
+  if (!Number.isFinite(amount)) return '-'
+
+  if (amount >= 1_000_000) {
+    return `${new Intl.NumberFormat('id-ID', { maximumFractionDigits: 1 }).format(amount / 1_000_000)} jt`
+  }
+  if (amount >= 1_000) {
+    return `${new Intl.NumberFormat('id-ID', { maximumFractionDigits: 1 }).format(amount / 1_000)} rb`
+  }
+  return new Intl.NumberFormat('id-ID', { maximumFractionDigits: 2 }).format(amount)
+}
+
+function formatServicePeriod(period) {
+  const unit = typeof period === 'string' ? period.match(/[YMW]$/i)?.[0].toUpperCase() : null
+  const units = { Y: 'tahun', M: 'bulan', W: 'pekan' }
+  return unit && units[unit] ? `/${units[unit]}` : ''
+}
 
 function ClientDashboardPage() {
   const [menuOpen, setMenuOpen] = useState(false)
@@ -88,6 +101,13 @@ function ClientDashboardPage() {
   const [isSavingProfile, setIsSavingProfile] = useState(false)
   const [isChangingPassword, setIsChangingPassword] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
+  const [serviceOrders, setServiceOrders] = useState([])
+  const [serviceState, setServiceState] = useState('idle')
+  const [serviceError, setServiceError] = useState('')
+  const [serviceLoadAttempt, setServiceLoadAttempt] = useState(0)
+  const [servicePage, setServicePage] = useState(1)
+
+  const servicesPerPage = 7
 
   useEffect(() => {
     const controller = new AbortController()
@@ -147,6 +167,36 @@ function ClientDashboardPage() {
 
     return () => controller.abort()
   }, [activePage, authState, profileLoadAttempt])
+
+  useEffect(() => {
+    if (authState !== 'authenticated' || activePage !== 'services') return undefined
+
+    const controller = new AbortController()
+    setServiceState('loading')
+    setServiceError('')
+
+    fetch('/api/fossbilling-auth.php?action=services', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result || !Array.isArray(result.orders)) {
+          throw new Error(result?.error || 'Daftar layanan tidak dapat dimuat.')
+        }
+        setServiceOrders(result.orders)
+        setServicePage(1)
+        setServiceState('loaded')
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setServiceError(error.message || 'Daftar layanan tidak dapat dimuat.')
+          setServiceState('error')
+        }
+      })
+
+    return () => controller.abort()
+  }, [activePage, authState, serviceLoadAttempt])
 
   const openPage = (page) => {
     setActivePage(page)
@@ -392,22 +442,71 @@ function ClientDashboardPage() {
     }
 
     if (activePage === 'services') {
+      const pageCount = Math.ceil(serviceOrders.length / servicesPerPage)
+      const visibleOrders = serviceOrders.slice((servicePage - 1) * servicesPerPage, servicePage * servicesPerPage)
       return (
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">AKUN PELANGGAN</span><h2>Layanan</h2><p>Kelola layanan dan lihat jadwal perpanjanganmu.</p></div></div>
-          <div className="dashboard-table-wrap dashboard-wide-table">
-            <table>
-              <thead><tr><th>ORDER</th><th>PRODUK / LAYANAN</th><th>HARGA</th><th>JATUH TEMPO</th><th>STATUS</th><th>AKSI</th></tr></thead>
-              <tbody>{serviceOrders.map((service) => (
-                <tr key={service.id}>
-                  <td><button className="dashboard-text-action" type="button" onClick={() => setNotice(`Detail order ${service.id} akan tersedia setelah API FossBilling terhubung.`)}>{service.id}</button></td>
-                  <td>{service.product}</td><td>{service.price}</td><td>{service.due}</td>
-                  <td><span className={`dashboard-status ${service.status === 'Aktif' ? 'status-active' : 'status-pending'}`}><i />{service.status}</span></td>
-                  <td><button className="dashboard-outline-action" type="button" onClick={() => setNotice(`Pengelolaan ${service.product} akan tersedia setelah API FossBilling terhubung.`)}>Kelola</button></td>
-                </tr>
-              ))}</tbody>
-            </table>
-          </div>
+          {serviceState === 'loading' ? (
+            <div className="dashboard-profile-loading" role="status">Memuat daftar layanan...</div>
+          ) : serviceState === 'error' ? (
+            <div className="dashboard-profile-load-error" role="alert">
+              <p>{serviceError}</p>
+              <button type="button" className="dashboard-profile-retry" onClick={() => setServiceLoadAttempt((attempt) => attempt + 1)}>Coba lagi</button>
+            </div>
+          ) : (
+            <>
+              <div className="dashboard-table-wrap dashboard-wide-table">
+                <table>
+                  <thead><tr><th>ORDER</th><th>PRODUK / LAYANAN</th><th>HARGA</th><th>JATUH TEMPO</th><th>STATUS</th><th>AKSI</th></tr></thead>
+                  <tbody>{visibleOrders.length ? visibleOrders.map((service) => {
+                    const status = service.status.toLowerCase()
+                    const statusLabels = {
+                      active: 'Aktif',
+                      canceled: 'Dibatalkan',
+                      cancelled: 'Dibatalkan',
+                      expired: 'Kedaluwarsa',
+                      pending: 'Menunggu',
+                      pending_setup: 'Menunggu pembayaran',
+                      suspended: 'Ditangguhkan',
+                    }
+                    const currency = typeof service.currency === 'string' && /^[A-Za-z]{3}$/.test(service.currency)
+                      ? service.currency.toUpperCase()
+                      : ''
+                    const priceLabel = currency && service.price !== null && service.price !== undefined
+                      ? `${currency} ${formatCompactPrice(service.price)}${formatServicePeriod(service.period)}`
+                      : '-'
+                    const dueDate = service.expires_at
+                      ? new Date(service.expires_at.replace(' ', 'T'))
+                      : null
+                    const dueLabel = dueDate && !Number.isNaN(dueDate.getTime())
+                      ? new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }).format(dueDate)
+                      : service.expires_at || '-'
+                    const statusLabel = statusLabels[status]
+                      || status.replace(/[_-]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+
+                    return (
+                      <tr key={service.id}>
+                        <td><button className="dashboard-text-action" type="button" onClick={() => setNotice(`Detail order #${service.id} akan tersedia setelah API FossBilling terhubung.`)}>#{service.id}</button></td>
+                        <td>{service.title}</td><td>{priceLabel}</td><td>{dueLabel}</td>
+                        <td><span className={`dashboard-status ${status === 'active' ? 'status-active' : 'status-pending'}`}><i />{statusLabel}</span></td>
+                        <td><button className="dashboard-outline-action" type="button" onClick={() => setNotice(`Pengelolaan ${service.title} akan tersedia setelah API FossBilling terhubung.`)}>Kelola</button></td>
+                      </tr>
+                    )
+                  }) : <tr><td className="dashboard-table-empty" colSpan="6">Belum ada layanan.</td></tr>}</tbody>
+                </table>
+              </div>
+              {pageCount > 1 && (
+                <div className="dashboard-pagination">
+                  <span>Halaman {servicePage} dari {pageCount}</span>
+                  <div>
+                    <button type="button" className="dashboard-outline-action" onClick={() => setServicePage((page) => page - 1)} disabled={servicePage === 1}>Sebelumnya</button>
+                    <button type="button" className="dashboard-outline-action" onClick={() => setServicePage((page) => page + 1)} disabled={servicePage === pageCount}>Selanjutnya</button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
         </section>
       )
     }
@@ -566,7 +665,7 @@ function ClientDashboardPage() {
         <div className="dashboard-content">
           <div className="dashboard-preview-alert" role="note">
             <span><ShieldCheck size={17} /></span>
-            <p><strong>Pratinjau dashboard</strong> — data di halaman ini hanya contoh dan belum diambil dari FossBilling.</p>
+            <p><strong>Pratinjau dashboard</strong> — beberapa data masih contoh; daftar layanan dimuat dari FossBilling.</p>
           </div>
 
           {activePage === 'dashboard' ? (

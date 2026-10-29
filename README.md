@@ -199,6 +199,12 @@ formulir. Input divalidasi di browser dan divalidasi ulang di backend. Formulir
 mengirim semua field yang dapat diedit, bukan hanya field yang berubah, agar
 nilai profil yang tidak disentuh tetap eksplisit.
 
+Saat menu Layanan dibuka, backend mengambil `/api/client/order/get_list`
+dengan sesi FossBilling dan hanya mengembalikan ID, judul, status, periode,
+mata uang, harga, serta tanggal kedaluwarsa yang dipakai tabel. Tabel
+menampilkan maksimal tujuh order per halaman dan meringkas harga berdasarkan
+mata uang dan unit periodenya.
+
 Ganti password mengirim `current_password`, `new_password`, dan
 `confirm_password` ke action lokal
 `/api/fossbilling-auth.php?action=password-change`. Backend memvalidasi

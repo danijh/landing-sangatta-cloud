@@ -314,7 +314,7 @@ function callFossBillingClient(string $endpoint, array $payload): array
     }
 
     $body = '';
-    $curl = curl_init(authBaseUrl() . '/api/client/profile/' . $endpoint);
+    $curl = curl_init(authBaseUrl() . '/api/client/' . $endpoint);
     if ($curl === false) {
         throw new RuntimeException('Unable to initialize FossBilling request.');
     }
@@ -388,7 +388,7 @@ function profileBelongsToSession(array $profile): bool
 
 function profileResponse(): array
 {
-    $response = callFossBillingClient('get', []);
+    $response = callFossBillingClient('profile/get', []);
     $profile = $response['result'] ?? null;
     if (!is_array($profile) || !profileBelongsToSession($profile)) {
         throw new DomainException('Profil yang diterima tidak sesuai dengan akun yang sedang masuk.', 403);
@@ -531,6 +531,59 @@ if ($action === 'profile' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
+if ($action === 'services' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (empty($_SESSION['fossbilling_authenticated'])) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+
+    try {
+        $response = callFossBillingClient('order/get_list', []);
+        $list = $response['result']['list'] ?? null;
+        if (!is_array($list)) {
+            throw new RuntimeException('FossBilling returned an invalid order list.');
+        }
+
+        $orders = [];
+        foreach ($list as $order) {
+            if (!is_array($order)
+                || (!is_int($order['id'] ?? null) && !is_string($order['id'] ?? null))
+                || trim((string) $order['id']) === ''
+                || !is_string($order['title'] ?? null)
+                || !is_string($order['status'] ?? null)
+                || (isset($order['currency']) && !is_string($order['currency']))
+                || (isset($order['price'])
+                    && ((!is_string($order['price'])
+                            && !is_int($order['price'])
+                            && !is_float($order['price']))
+                        || !is_numeric((string) $order['price'])))
+                || (isset($order['period']) && !is_string($order['period']))
+                || (isset($order['expires_at']) && !is_string($order['expires_at']))) {
+                throw new RuntimeException('FossBilling returned an invalid order record.');
+            }
+
+            $orders[] = [
+                'id' => (string) $order['id'],
+                'title' => $order['title'],
+                'status' => $order['status'],
+                'currency' => $order['currency'] ?? null,
+                'price' => $order['price'] ?? null,
+                'period' => $order['period'] ?? null,
+                'expires_at' => $order['expires_at'] ?? null,
+            ];
+        }
+
+        respond(['orders' => $orders]);
+    } catch (DomainException $error) {
+        if ($error->getCode() === 401) {
+            $_SESSION = [];
+        }
+        respond(['error' => $error->getMessage()], $error->getCode() ?: 422);
+    } catch (Throwable $error) {
+        error_log('FossBilling order API error: ' . $error->getMessage());
+        respond(['error' => 'Daftar layanan tidak dapat dimuat dari server akun. Coba lagi nanti.'], 502);
+    }
+}
+
 if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change'], true)
     || $_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(['error' => 'Permintaan tidak valid.'], 405);
@@ -593,7 +646,7 @@ try {
             respond(['error' => 'Konfirmasi password baru belum sama.'], 422);
         }
 
-        $result = callFossBillingClient('change_password', [
+        $result = callFossBillingClient('profile/change_password', [
             'current_password' => $currentPassword,
             'new_password' => $newPassword,
             'confirm_password' => $confirmPassword,
@@ -628,7 +681,7 @@ try {
         if (!profileBelongsToSession($currentProfile)) {
             respond(['error' => 'Profil tidak dimiliki oleh akun yang sedang masuk.'], 403);
         }
-        callFossBillingClient('update', $payload);
+        callFossBillingClient('profile/update', $payload);
         $updatedProfile = profileResponse();
         if (!profileBelongsToSession($updatedProfile)) {
             respond(['error' => 'Profil hasil pembaruan tidak sesuai dengan akun yang sedang masuk.'], 403);
