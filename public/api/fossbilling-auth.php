@@ -375,6 +375,80 @@ function callFossBillingClient(string $endpoint, array $payload): array
     return $decoded;
 }
 
+function fetchHelpdesks(): array
+{
+    if (!function_exists('curl_init') || !class_exists('DOMDocument')) {
+        throw new RuntimeException('Required PHP extensions are unavailable.');
+    }
+
+    $cookies = $_SESSION['fossbilling_cookies'] ?? [];
+    $cookieHeader = [];
+    foreach (['fossbilling_session', 'fossbilling_csrf'] as $name) {
+        $value = is_array($cookies) ? ($cookies[$name] ?? null) : null;
+        if (is_string($value) && $value !== '' && strlen($value) <= 4096
+            && preg_match('/[\x00-\x20\x7f;,]/', $value) !== 1) {
+            $cookieHeader[] = $name . '=' . $value;
+        }
+    }
+    if (!isset($cookies['fossbilling_session']) || $cookieHeader === []) {
+        throw new DomainException('Sesi FossBilling tidak valid. Silakan masuk kembali.', 401);
+    }
+
+    $body = '';
+    $curl = curl_init(authBaseUrl() . '/support');
+    if ($curl === false) {
+        throw new RuntimeException('Unable to initialize FossBilling request.');
+    }
+    curl_setopt_array($curl, [
+        CURLOPT_CONNECTTIMEOUT => 3,
+        CURLOPT_TIMEOUT => 8,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_COOKIE => implode('; ', $cookieHeader),
+        CURLOPT_HTTPHEADER => ['Accept: text/html'],
+        CURLOPT_WRITEFUNCTION => static function ($handle, string $chunk) use (&$body): int {
+            if (strlen($body) + strlen($chunk) > 2097152) {
+                return 0;
+            }
+            $body .= $chunk;
+            return strlen($chunk);
+        },
+    ]);
+    $result = curl_exec($curl);
+    $status = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+    curl_close($curl);
+
+    if ($result === false) {
+        throw new RuntimeException('FossBilling support page request failed.');
+    }
+    if ($status >= 300 && $status < 400 || $status === 401 || $status === 403) {
+        throw new DomainException('Sesi FossBilling tidak valid. Silakan masuk kembali.', 401);
+    }
+    if ($status !== 200) {
+        throw new RuntimeException('FossBilling support page returned HTTP ' . $status);
+    }
+
+    $document = new DOMDocument();
+    $previous = libxml_use_internal_errors(true);
+    $document->loadHTML('<?xml encoding="UTF-8">' . $body);
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+
+    $select = (new DOMXPath($document))->query('//select[@name="support_helpdesk_id"]')->item(0);
+    if (!$select instanceof DOMElement) {
+        throw new RuntimeException('Helpdesk select was not found.');
+    }
+
+    $helpdesks = [];
+    foreach ($select->getElementsByTagName('option') as $option) {
+        $helpdesks[] = [
+            'value' => $option->getAttribute('value'),
+            'label' => trim($option->textContent),
+        ];
+    }
+
+    return $helpdesks;
+}
+
 function profileBelongsToSession(array $profile): bool
 {
     $ownerId = $_SESSION['fossbilling_client']['id'] ?? null;
@@ -584,7 +658,116 @@ if ($action === 'services' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
-if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change'], true)
+if ($action === 'helpdesks' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (empty($_SESSION['fossbilling_authenticated'])) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+
+    try {
+        respond(['helpdesks' => fetchHelpdesks()]);
+    } catch (DomainException $error) {
+        if ($error->getCode() === 401) {
+            $_SESSION = [];
+        }
+        respond(['error' => $error->getMessage()], $error->getCode() ?: 422);
+    } catch (Throwable $error) {
+        error_log('FossBilling helpdesk error: ' . $error->getMessage());
+        respond(['error' => 'Daftar helpdesk tidak dapat dimuat. Coba lagi nanti.'], 502);
+    }
+}
+
+if ($action === 'tickets' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (empty($_SESSION['fossbilling_authenticated'])) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+
+    try {
+        $response = callFossBillingClient('support/ticket_get_list', ['per_page' => 100]);
+        $result = $response['result'] ?? null;
+        if (!is_array($result) || !is_array($result['list'] ?? null)) {
+            throw new RuntimeException('FossBilling returned an invalid ticket list.');
+        }
+        $text = static fn ($value): string => is_scalar($value) ? substr((string) $value, 0, 500) : '';
+
+        $tickets = [];
+        foreach ($result['list'] as $ticket) {
+            if (!is_array($ticket) || !is_scalar($ticket['id'] ?? null)) {
+                continue;
+            }
+            $tickets[] = [
+                'id' => $text($ticket['id']),
+                'subject' => $text($ticket['subject'] ?? ''),
+                'status' => $text($ticket['status'] ?? ''),
+                'helpdesk' => $text(is_array($ticket['helpdesk'] ?? null) ? ($ticket['helpdesk']['name'] ?? '') : ''),
+                'created_at' => $text($ticket['created_at'] ?? ''),
+            ];
+        }
+
+        respond(['total' => (int) ($result['total'] ?? count($tickets)), 'tickets' => $tickets]);
+    } catch (DomainException $error) {
+        if ($error->getCode() === 401) {
+            $_SESSION = [];
+        }
+        respond(['error' => $error->getMessage()], $error->getCode() ?: 422);
+    } catch (Throwable $error) {
+        error_log('FossBilling ticket list error: ' . $error->getMessage());
+        respond(['error' => 'Daftar tiket tidak dapat dimuat. Coba lagi nanti.'], 502);
+    }
+}
+
+if ($action === 'ticket' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (empty($_SESSION['fossbilling_authenticated'])) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+
+    $ticketId = $_GET['id'] ?? '';
+    if (!is_string($ticketId) || preg_match('/^[0-9]{1,18}$/', $ticketId) !== 1) {
+        respond(['error' => 'ID tiket tidak valid.'], 422);
+    }
+
+    try {
+        $response = callFossBillingClient('support/ticket_get', ['id' => (int) $ticketId]);
+        $ticket = $response['result'] ?? null;
+        if (!is_array($ticket) || !is_array($ticket['messages'] ?? null)) {
+            throw new RuntimeException('FossBilling returned an invalid ticket.');
+        }
+        $text = static fn ($value): string => is_scalar($value) ? substr((string) $value, 0, 100000) : '';
+
+        $messages = [];
+        foreach ($ticket['messages'] as $message) {
+            if (!is_array($message)) {
+                continue;
+            }
+            $author = is_array($message['author'] ?? null) ? $message['author'] : [];
+            $messages[] = [
+                'id' => $text($message['id'] ?? ''),
+                'content' => $text($message['content'] ?? ''),
+                'author' => $text($author['name'] ?? ''),
+                'is_staff' => ($author['role'] ?? 'client') !== 'client',
+                'created_at' => $text($message['created_at'] ?? ''),
+            ];
+        }
+
+        respond(['ticket' => [
+            'id' => $text($ticket['id'] ?? $ticketId),
+            'subject' => $text($ticket['subject'] ?? ''),
+            'status' => $text($ticket['status'] ?? ''),
+            'helpdesk' => $text(is_array($ticket['helpdesk'] ?? null) ? ($ticket['helpdesk']['name'] ?? '') : ''),
+            'created_at' => $text($ticket['created_at'] ?? ''),
+            'messages' => $messages,
+        ]]);
+    } catch (DomainException $error) {
+        if ($error->getCode() === 401) {
+            $_SESSION = [];
+        }
+        respond(['error' => $error->getMessage()], $error->getCode() ?: 422);
+    } catch (Throwable $error) {
+        error_log('FossBilling ticket error: ' . $error->getMessage());
+        respond(['error' => 'Tiket tidak dapat dimuat. Coba lagi nanti.'], 502);
+    }
+}
+
+if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close'], true)
     || $_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(['error' => 'Permintaan tidak valid.'], 405);
 }
@@ -593,7 +776,7 @@ if (!csrfIsValid()) {
     respond(['error' => 'Sesi kedaluwarsa. Muat ulang halaman lalu coba lagi.'], 403);
 }
 
-if (in_array($action, ['logout', 'profile-update', 'password-change'], true)
+if (in_array($action, ['logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close'], true)
     && empty($_SESSION['fossbilling_authenticated'])) {
     respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
 }
@@ -614,6 +797,75 @@ if ($action === 'logout') {
 }
 
 try {
+    if ($action === 'ticket-create') {
+        $rawBody = file_get_contents('php://input');
+        if ($rawBody === false || strlen($rawBody) > 65536) {
+            respond(['error' => 'Permintaan terlalu besar.'], 413);
+        }
+        $input = json_decode($rawBody ?: '', true, 16, JSON_THROW_ON_ERROR);
+        if (!is_array($input) || array_diff(array_keys($input), ['support_helpdesk_id', 'subject', 'content']) !== []) {
+            respond(['error' => 'Format data tidak valid.'], 400);
+        }
+        $helpdeskId = $input['support_helpdesk_id'] ?? null;
+        $subject = $input['subject'] ?? null;
+        $content = $input['content'] ?? null;
+        if (!is_string($helpdeskId) || preg_match('/^[0-9]{1,18}$/', $helpdeskId) !== 1) {
+            respond(['error' => 'Helpdesk tidak valid.'], 422);
+        }
+        if (!is_string($subject) || trim($subject) === '' || strlen($subject) > 255) {
+            respond(['error' => 'Subjek wajib diisi (maksimal 255 karakter).'], 422);
+        }
+        if (!is_string($content) || trim($content) === '' || strlen($content) > 50000) {
+            respond(['error' => 'Pesan wajib diisi.'], 422);
+        }
+
+        $response = callFossBillingClient('support/ticket_create', [
+            'support_helpdesk_id' => (int) $helpdeskId,
+            'subject' => trim($subject),
+            'content' => $content,
+        ]);
+        $ticketId = $response['result'] ?? null;
+        if (!is_int($ticketId) && !(is_string($ticketId) && ctype_digit($ticketId))) {
+            throw new RuntimeException('FossBilling returned an unexpected ticket response.');
+        }
+        respond(['result' => (int) $ticketId, 'error' => null]);
+    }
+
+    if ($action === 'ticket-close') {
+        $rawBody = file_get_contents('php://input');
+        $input = json_decode($rawBody === false ? '' : substr($rawBody, 0, 1024), true, 16, JSON_THROW_ON_ERROR);
+        $ticketId = is_array($input) ? ($input['id'] ?? null) : null;
+        if (!is_array($input) || array_diff(array_keys($input), ['id']) !== []
+            || !is_string($ticketId) || preg_match('/^[0-9]{1,18}$/', $ticketId) !== 1) {
+            respond(['error' => 'ID tiket tidak valid.'], 422);
+        }
+
+        callFossBillingClient('support/ticket_close', ['id' => (int) $ticketId]);
+        respond(['result' => true, 'error' => null]);
+    }
+
+    if ($action === 'ticket-reply') {
+        $rawBody = file_get_contents('php://input');
+        if ($rawBody === false || strlen($rawBody) > 65536) {
+            respond(['error' => 'Permintaan terlalu besar.'], 413);
+        }
+        $input = json_decode($rawBody ?: '', true, 16, JSON_THROW_ON_ERROR);
+        if (!is_array($input) || array_diff(array_keys($input), ['id', 'content']) !== []) {
+            respond(['error' => 'Format data tidak valid.'], 400);
+        }
+        $ticketId = $input['id'] ?? null;
+        $content = $input['content'] ?? null;
+        if (!is_string($ticketId) || preg_match('/^[0-9]{1,18}$/', $ticketId) !== 1) {
+            respond(['error' => 'ID tiket tidak valid.'], 422);
+        }
+        if (!is_string($content) || trim($content) === '' || strlen($content) > 50000) {
+            respond(['error' => 'Pesan wajib diisi.'], 422);
+        }
+
+        callFossBillingClient('support/ticket_reply', ['id' => (int) $ticketId, 'content' => $content]);
+        respond(['result' => true, 'error' => null]);
+    }
+
     if ($action === 'password-change') {
         $rawBody = file_get_contents('php://input');
         if ($rawBody === false || strlen($rawBody) > 8192) {

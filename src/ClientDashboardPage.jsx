@@ -24,6 +24,7 @@ import {
   ShieldCheck,
   UserRound,
   Wallet,
+  Quote,
   X,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
@@ -82,6 +83,17 @@ function formatServicePeriod(period) {
   return unit && units[unit] ? `/${units[unit]}` : ''
 }
 
+function formatRelativeTime(value) {
+  const date = value ? new Date(`${String(value).replace(' ', 'T')}Z`) : null
+  if (!date || Number.isNaN(date.getTime())) return value || '-'
+  const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000))
+  const units = [['hari', 86400], ['jam', 3600], ['menit', 60]]
+  for (const [label, size] of units) {
+    if (seconds >= size) return `${Math.floor(seconds / size)} ${label} lalu`
+  }
+  return 'Baru saja'
+}
+
 function ClientDashboardPage() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [notice, setNotice] = useState('')
@@ -106,6 +118,22 @@ function ClientDashboardPage() {
   const [serviceError, setServiceError] = useState('')
   const [serviceLoadAttempt, setServiceLoadAttempt] = useState(0)
   const [servicePage, setServicePage] = useState(1)
+  const [ticketModalOpen, setTicketModalOpen] = useState(false)
+  const [helpdesks, setHelpdesks] = useState([])
+  const [helpdeskState, setHelpdeskState] = useState('idle')
+  const [isCreatingTicket, setIsCreatingTicket] = useState(false)
+  const [activeTicketId, setActiveTicketId] = useState(null)
+  const [ticket, setTicket] = useState(null)
+  const [ticketState, setTicketState] = useState('idle')
+  const [ticketError, setTicketError] = useState('')
+  const [replyOpen, setReplyOpen] = useState(false)
+  const [replyText, setReplyText] = useState('')
+  const [isReplying, setIsReplying] = useState(false)
+  const [isClosingTicket, setIsClosingTicket] = useState(false)
+  const [ticketList, setTicketList] = useState([])
+  const [ticketListState, setTicketListState] = useState('idle')
+  const [ticketListError, setTicketListError] = useState('')
+  const [ticketListAttempt, setTicketListAttempt] = useState(0)
 
   const servicesPerPage = 7
 
@@ -167,6 +195,89 @@ function ClientDashboardPage() {
 
     return () => controller.abort()
   }, [activePage, authState, profileLoadAttempt])
+
+  useEffect(() => {
+    if (authState !== 'authenticated' || activePage !== 'support' || activeTicketId) return undefined
+
+    const controller = new AbortController()
+    setTicketListState('loading')
+    setTicketListError('')
+
+    fetch('/api/fossbilling-auth.php?action=tickets', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result || !Array.isArray(result.tickets)) {
+          throw new Error(result?.error || 'Daftar tiket tidak dapat dimuat.')
+        }
+        setTicketList(result.total === 0 ? [] : result.tickets)
+        setTicketListState('loaded')
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setTicketListError(error.message || 'Daftar tiket tidak dapat dimuat.')
+          setTicketListState('error')
+        }
+      })
+
+    return () => controller.abort()
+  }, [activePage, authState, activeTicketId, ticketListAttempt])
+
+  useEffect(() => {
+    if (authState !== 'authenticated' || activePage !== 'support' || !activeTicketId) return undefined
+
+    const controller = new AbortController()
+    setTicketState('loading')
+    setTicketError('')
+
+    fetch(`/api/fossbilling-auth.php?action=ticket&id=${encodeURIComponent(activeTicketId)}`, {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result?.ticket) {
+          throw new Error(result?.error || 'Tiket tidak dapat dimuat.')
+        }
+        setTicket(result.ticket)
+        setTicketState('loaded')
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setTicketError(error.message || 'Tiket tidak dapat dimuat.')
+          setTicketState('error')
+        }
+      })
+
+    return () => controller.abort()
+  }, [activePage, authState, activeTicketId])
+
+  useEffect(() => {
+    if (!ticketModalOpen) return undefined
+
+    const controller = new AbortController()
+    setHelpdeskState('loading')
+
+    fetch('/api/fossbilling-auth.php?action=helpdesks', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result || !Array.isArray(result.helpdesks)) {
+          throw new Error(result?.error || 'Helpdesk tidak dapat dimuat.')
+        }
+        setHelpdesks(result.helpdesks)
+        setHelpdeskState('loaded')
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') setHelpdeskState('error')
+      })
+
+    return () => controller.abort()
+  }, [ticketModalOpen])
 
   useEffect(() => {
     if (authState !== 'authenticated' || activePage !== 'services') return undefined
@@ -238,6 +349,117 @@ function ClientDashboardPage() {
       setNotice(error.message || 'Tidak dapat mengakhiri sesi. Coba lagi.')
       setIsLoggingOut(false)
       setAccountMenuOpen(false)
+    }
+  }
+
+  const handleTicketCreate = async (event) => {
+    event.preventDefault()
+    const formData = new FormData(event.currentTarget)
+    setIsCreatingTicket(true)
+    setNotice('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=ticket-create', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+        body: JSON.stringify({
+          support_helpdesk_id: String(formData.get('support_helpdesk_id') || ''),
+          subject: String(formData.get('subject') || ''),
+          content: String(formData.get('message') || ''),
+        }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || !result || !Number.isInteger(result.result)) {
+        throw new Error(result?.error || 'Tiket tidak dapat dibuat.')
+      }
+      setTicket(null)
+      setReplyOpen(false)
+      setReplyText('')
+      setActiveTicketId(result.result)
+      setTicketModalOpen(false)
+      setNotice('Tiket berhasil dibuat.')
+    } catch (error) {
+      setNotice(error.message || 'Tiket tidak dapat dibuat.')
+    } finally {
+      setIsCreatingTicket(false)
+    }
+  }
+
+  const openReply = (quote = '') => {
+    setReplyOpen(true)
+    setReplyText((current) => {
+      const quoted = quote ? `${quote.split('\n').map((line) => `> ${line}`).join('\n')}\n\n` : ''
+      return current && quoted ? `${current.replace(/\s*$/, '')}\n\n${quoted}` : current || quoted
+    })
+    setTimeout(() => document.getElementById('ticket-reply-text')?.focus(), 0)
+  }
+
+  const handleTicketReply = async (event) => {
+    event.preventDefault()
+    setIsReplying(true)
+    setNotice('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=ticket-reply', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+        body: JSON.stringify({ id: String(activeTicketId), content: replyText }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || result?.result !== true) {
+        throw new Error(result?.error || 'Balasan tidak dapat dikirim.')
+      }
+      const ticketResponse = await fetch(`/api/fossbilling-auth.php?action=ticket&id=${encodeURIComponent(activeTicketId)}`, {
+        credentials: 'same-origin',
+      })
+      const ticketResult = await ticketResponse.json().catch(() => null)
+      if (ticketResponse.ok && ticketResult?.ticket) setTicket(ticketResult.ticket)
+      setReplyText('')
+      setReplyOpen(false)
+      setNotice('Balasan terkirim.')
+    } catch (error) {
+      setNotice(error.message || 'Balasan tidak dapat dikirim.')
+    } finally {
+      setIsReplying(false)
+    }
+  }
+
+  const handleTicketClose = async () => {
+    if (!window.confirm('Tutup tiket ini? Tiket yang sudah ditutup tidak dapat dibuka kembali.')) return
+    setIsClosingTicket(true)
+    setNotice('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=ticket-close', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+        body: JSON.stringify({ id: String(activeTicketId) }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || result?.result !== true) {
+        throw new Error(result?.error || 'Tiket tidak dapat ditutup.')
+      }
+      const ticketResponse = await fetch(`/api/fossbilling-auth.php?action=ticket&id=${encodeURIComponent(activeTicketId)}`, {
+        credentials: 'same-origin',
+      })
+      const ticketResult = await ticketResponse.json().catch(() => null)
+      if (ticketResponse.ok && ticketResult?.ticket) setTicket(ticketResult.ticket)
+      setReplyOpen(false)
+      setReplyText('')
+      setNotice('Tiket berhasil ditutup.')
+    } catch (error) {
+      setNotice(error.message || 'Tiket tidak dapat ditutup.')
+    } finally {
+      setIsClosingTicket(false)
     }
   }
 
@@ -430,13 +652,114 @@ function ClientDashboardPage() {
     }
 
     if (activePage === 'support') {
+      if (activeTicketId) {
+        const formatTicketDate = (value) => {
+          const date = value ? new Date(`${String(value).replace(' ', 'T')}Z`) : null
+          return date && !Number.isNaN(date.getTime())
+            ? new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date)
+            : value || '-'
+        }
+        const ticketStatusLabels = { open: 'Terbuka', on_hold: 'Ditunda', closed: 'Ditutup' }
+        const ticketStatus = ticket ? ticket.status.toLowerCase() : ''
+        const ticketStatusLabel = ticketStatusLabels[ticketStatus]
+          || ticketStatus.replace(/[_-]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+
+        return (
+          <section className="dashboard-page-panel">
+            <div className="dashboard-page-heading dashboard-page-heading-action">
+              <div><span className="dashboard-section-kicker">BANTUAN PELANGGAN</span><h2>Tiket #{activeTicketId}</h2></div>
+              <div className="dashboard-ticket-actions">
+                {ticketStatus !== 'closed' && ticket ? (
+                  <>
+                    <button className="dashboard-primary-action" type="button" onClick={() => openReply()}>Balas</button>
+                    <button className="dashboard-profile-retry" type="button" onClick={handleTicketClose} disabled={isClosingTicket}>{isClosingTicket ? 'Menutup...' : 'Tutup tiket'}</button>
+                  </>
+                ) : null}
+                <button className="dashboard-profile-retry" type="button" onClick={() => { setActiveTicketId(null); setTicket(null); setReplyOpen(false); setReplyText('') }}>Kembali</button>
+              </div>
+            </div>
+            {ticketState === 'loading' ? (
+              <div className="dashboard-profile-loading" role="status">Memuat tiket...</div>
+            ) : ticketState === 'error' ? (
+              <div className="dashboard-profile-load-error" role="alert">
+                <p>{ticketError}</p>
+                <button type="button" className="dashboard-profile-retry" onClick={() => { const id = activeTicketId; setActiveTicketId(null); setTimeout(() => setActiveTicketId(id), 0) }}>Coba lagi</button>
+              </div>
+            ) : ticket ? (
+              <>
+                <dl className="dashboard-ticket-meta">
+                  <div><dt>Helpdesk</dt><dd>{ticket.helpdesk || '-'}</dd></div>
+                  <div><dt>Status</dt><dd><span className={`dashboard-status ${ticketStatus === 'open' ? 'status-active' : ticketStatus === 'on_hold' ? 'status-pending' : 'status-closed'}`}><i />{ticketStatusLabel}</span></dd></div>
+                  <div><dt>Dibuka</dt><dd>{formatTicketDate(ticket.created_at)}</dd></div>
+                </dl>
+                <div className="dashboard-ticket-messages">
+                  {ticket.messages.map((message) => (
+                    <article className={`dashboard-ticket-message${message.is_staff ? ' is-staff' : ''}`} key={message.id}>
+                      <header>
+                        <strong>{message.author || (message.is_staff ? 'Tim dukungan' : 'Kamu')}</strong>
+                        <span className="dashboard-ticket-role">{message.is_staff ? 'Operator' : 'Kamu'}</span>
+                        <small>pada {formatTicketDate(message.created_at)}</small>
+                        <span className="dashboard-ticket-number">#{message.id}</span>
+                        {ticketStatus !== 'closed' ? <button className="dashboard-ticket-quote" type="button" onClick={() => openReply(message.content)} aria-label={`Kutip pesan #${message.id}`} title="Kutip balasan"><Quote size={14} /></button> : null}
+                      </header>
+                      <p>{message.content}</p>
+                    </article>
+                  ))}
+                </div>
+                {replyOpen && ticketStatus !== 'closed' ? (
+                  <form className="dashboard-ticket-reply" onSubmit={handleTicketReply}>
+                    <textarea id="ticket-reply-text" rows={6} value={replyText} onChange={(event) => setReplyText(event.target.value)} placeholder="Tulis balasan..." required />
+                    <div>
+                      <button className="dashboard-primary-action" type="submit" disabled={isReplying || replyText.trim() === ''}>{isReplying ? 'Mengirim...' : 'Kirim'}</button>
+                      <button className="dashboard-profile-retry" type="button" onClick={() => { setReplyOpen(false); setReplyText('') }}>Batal</button>
+                    </div>
+                  </form>
+                ) : null}
+                {ticketStatus === 'closed' ? <p className="dashboard-ticket-closed" role="status">Tiket ini sudah ditutup dan tidak dapat dibuka kembali.</p> : null}
+              </>
+            ) : null}
+          </section>
+        )
+      }
+
       return (
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading dashboard-page-heading-action">
             <div><span className="dashboard-section-kicker">BANTUAN PELANGGAN</span><h2>Tiket dukungan</h2><p>Ada pertanyaan? Tim kami siap membantu.</p></div>
-            <button className="dashboard-primary-action" type="button" onClick={() => setNotice('Pembuatan tiket dukungan akan tersedia setelah API FossBilling terhubung.')}><LifeBuoy size={16} /> Tiket baru</button>
+            <button className="dashboard-primary-action" type="button" onClick={() => setTicketModalOpen(true)}><LifeBuoy size={16} /> Tiket baru</button>
           </div>
-          <div className="dashboard-empty-state"><span><LifeBuoy size={22} /></span><strong>Belum ada tiket dukungan</strong><p>Tiket yang kamu buat akan muncul di halaman ini.</p></div>
+          {ticketListState === 'loading' || ticketListState === 'idle' ? (
+            <div className="dashboard-profile-loading" role="status">Memuat tiket...</div>
+          ) : ticketListState === 'error' ? (
+            <div className="dashboard-profile-load-error" role="alert">
+              <p>{ticketListError}</p>
+              <button type="button" className="dashboard-profile-retry" onClick={() => setTicketListAttempt((attempt) => attempt + 1)}>Coba lagi</button>
+            </div>
+          ) : ticketList.length === 0 ? (
+            <div className="dashboard-empty-state"><span><LifeBuoy size={22} /></span><strong>Belum ada tiket dukungan</strong><p>Tiket yang kamu buat akan muncul di halaman ini.</p></div>
+          ) : (
+            <div className="dashboard-table-wrap dashboard-wide-table">
+              <table>
+                <thead><tr><th>ID</th><th>SUBJEK</th><th>HELPDESK</th><th>STATUS</th><th>DIKIRIM</th><th>AKSI</th></tr></thead>
+                <tbody>{ticketList.map((item) => {
+                  const itemStatus = item.status.toLowerCase()
+                  const itemStatusLabel = { open: 'Terbuka', on_hold: 'Ditunda', closed: 'Ditutup' }[itemStatus]
+                    || itemStatus.replace(/[_-]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+                  const openItem = () => { setTicket(null); setReplyOpen(false); setReplyText(''); setActiveTicketId(item.id) }
+                  return (
+                    <tr key={item.id}>
+                      <td>#{item.id}</td>
+                      <td><button className="dashboard-ticket-link" type="button" onClick={openItem}>{item.subject}</button></td>
+                      <td>{item.helpdesk || '-'}</td>
+                      <td><span className={`dashboard-status ${itemStatus === 'open' ? 'status-active' : itemStatus === 'on_hold' ? 'status-pending' : 'status-closed'}`}><i />{itemStatusLabel}</span></td>
+                      <td>{formatRelativeTime(item.created_at)}</td>
+                      <td><button className="dashboard-profile-retry" type="button" onClick={openItem}>{itemStatus === 'closed' ? 'Lihat' : 'Balas'}</button></td>
+                    </tr>
+                  )
+                })}</tbody>
+              </table>
+            </div>
+          )}
         </section>
       )
     }
@@ -776,6 +1099,35 @@ function ClientDashboardPage() {
           ) : renderMenuPage()}
           <footer className="dashboard-footer"><span>Ruang digital yang lebih personal.</span><span><FileText size={13} /> Privasi & keamanan adalah prioritas kami.</span></footer>
         </div>
+        {ticketModalOpen && (
+          <div className="dashboard-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setTicketModalOpen(false) }}>
+            <form
+              className="dashboard-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="ticket-modal-title"
+              onKeyDown={(event) => { if (event.key === 'Escape') setTicketModalOpen(false) }}
+              onSubmit={handleTicketCreate}
+            >
+              <div className="dashboard-modal-header">
+                <h3 id="ticket-modal-title">Buat tiket baru</h3>
+                <button type="button" onClick={() => setTicketModalOpen(false)} aria-label="Tutup"><X size={18} /></button>
+              </div>
+              <div className="dashboard-modal-body">
+                <label className="dashboard-profile-field"><span>Helpdesk</span><select name="support_helpdesk_id" disabled={helpdeskState === 'loading'}>
+                  {helpdeskState === 'loading' && <option>Memuat...</option>}
+                  {helpdeskState === 'error' && <option value="">Helpdesk tidak dapat dimuat</option>}
+                  {helpdesks.map((helpdesk) => <option key={helpdesk.value} value={helpdesk.value}>{helpdesk.label}</option>)}
+                </select></label>
+                <label className="dashboard-profile-field"><span>Subjek <b>*</b></span><input name="subject" type="text" required autoFocus /></label>
+                <label className="dashboard-profile-field"><span>Pesan <b>*</b></span><textarea name="message" rows={6} required /></label>
+              </div>
+              <div className="dashboard-modal-footer">
+                <button className="dashboard-primary-action" type="submit" disabled={isCreatingTicket || helpdeskState !== 'loaded'}>{isCreatingTicket ? 'Mengirim...' : 'Kirim'}</button>
+              </div>
+            </form>
+          </div>
+        )}
         {notice && (
           <div className="dashboard-toast" role="status">
             <span>{notice}</span>
