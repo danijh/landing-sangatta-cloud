@@ -715,6 +715,30 @@ if ($action === 'tickets' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
+if ($action === 'notifications' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    $clientId = $_SESSION['fossbilling_client']['id'] ?? null;
+    if (empty($_SESSION['fossbilling_authenticated'])
+        || !(is_int($clientId) || is_string($clientId))
+        || preg_match('/^[0-9]{1,18}$/', (string) $clientId) !== 1) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+    session_write_close();
+
+    $file = $storageDirectory . '/notifications/' . (int) $clientId . '.json';
+    $stored = is_file($file) ? json_decode((string) file_get_contents($file), true) : [];
+    $stored = is_array($stored) ? $stored : [];
+    $lastId = $stored === [] ? 0 : (int) end($stored)['id'];
+
+    // Without "after" the caller only learns the current position, so old items are not replayed.
+    if (!isset($_GET['after']) || !is_string($_GET['after']) || preg_match('/^[0-9]{1,18}$/', $_GET['after']) !== 1) {
+        respond(['items' => [], 'lastId' => $lastId]);
+    }
+
+    $after = (int) $_GET['after'];
+    $items = array_values(array_filter($stored, static fn ($item) => (int) $item['id'] > $after));
+    respond(['items' => $items, 'lastId' => max($lastId, $after)]);
+}
+
 if ($action === 'ticket' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     if (empty($_SESSION['fossbilling_authenticated'])) {
         respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);

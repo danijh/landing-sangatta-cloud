@@ -2,7 +2,6 @@ import {
   ArrowDownToLine,
   ArrowRight,
   BookOpen,
-  Bell,
   ChevronDown,
   ChevronRight,
   CircleHelp,
@@ -28,6 +27,7 @@ import {
   X,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { NotificationBell, useNotifications } from './notifications.jsx'
 
 const countryCodes = 'AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'.split(' ')
 const countryNames = new Intl.DisplayNames(['id'], { type: 'region' })
@@ -97,7 +97,7 @@ function formatRelativeTime(value) {
 function ClientDashboardPage() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [notice, setNotice] = useState('')
-  const [activePage, setActivePage] = useState('dashboard')
+  const [activePage, setActivePage] = useState(() => (window.location.hash === '#profile' || window.location.hash.startsWith('#ticket-') ? (window.location.hash === '#profile' ? 'profile' : 'support') : 'dashboard'))
   const [invoiceFilter, setInvoiceFilter] = useState('Menunggu')
   const [articleQuery, setArticleQuery] = useState('')
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
@@ -122,7 +122,7 @@ function ClientDashboardPage() {
   const [helpdesks, setHelpdesks] = useState([])
   const [helpdeskState, setHelpdeskState] = useState('idle')
   const [isCreatingTicket, setIsCreatingTicket] = useState(false)
-  const [activeTicketId, setActiveTicketId] = useState(null)
+  const [activeTicketId, setActiveTicketId] = useState(() => (/^#ticket-[0-9]{1,18}$/.test(window.location.hash) ? window.location.hash.slice(8) : null))
   const [ticket, setTicket] = useState(null)
   const [ticketState, setTicketState] = useState('idle')
   const [ticketError, setTicketError] = useState('')
@@ -134,6 +134,12 @@ function ClientDashboardPage() {
   const [ticketListState, setTicketListState] = useState('idle')
   const [ticketListError, setTicketListError] = useState('')
   const [ticketListAttempt, setTicketListAttempt] = useState(0)
+  const [bellOpen, setBellOpen] = useState(false)
+  const notifications = useNotifications({
+    enabled: authState === 'authenticated',
+    clientId: client.id,
+    onNew: () => setTicketListAttempt((attempt) => attempt + 1),
+  })
 
   const servicesPerPage = 7
 
@@ -310,11 +316,22 @@ function ClientDashboardPage() {
   }, [activePage, authState, serviceLoadAttempt])
 
   const openPage = (page) => {
+    if (page === 'support') {
+      setActiveTicketId(null)
+      setTicket(null)
+      setReplyOpen(false)
+      setReplyText('')
+      setTicketListAttempt((attempt) => attempt + 1)
+    }
+    setBellOpen(false)
     setActivePage(page)
     setMenuOpen(false)
     setNotice('')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
+
+  const { unreadTicketIds, markTicketRead } = notifications
+  const supportUnread = unreadTicketIds.size
 
   const customerName = profile?.name
     || [profile?.first_name, profile?.last_name].filter(Boolean).join(' ')
@@ -745,11 +762,11 @@ function ClientDashboardPage() {
                   const itemStatus = item.status.toLowerCase()
                   const itemStatusLabel = { open: 'Terbuka', on_hold: 'Ditunda', closed: 'Ditutup' }[itemStatus]
                     || itemStatus.replace(/[_-]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
-                  const openItem = () => { setTicket(null); setReplyOpen(false); setReplyText(''); setActiveTicketId(item.id) }
+                  const openItem = () => { markTicketRead(item.id); setTicket(null); setReplyOpen(false); setReplyText(''); setActiveTicketId(item.id) }
                   return (
                     <tr key={item.id}>
                       <td>#{item.id}</td>
-                      <td><button className="dashboard-ticket-link" type="button" onClick={openItem}>{item.subject}</button></td>
+                      <td><button className="dashboard-ticket-link" type="button" onClick={openItem}>{unreadTicketIds.has(String(item.id)) && <i className="dashboard-unread-dot" aria-label="Belum dibaca" />}{item.subject}</button></td>
                       <td>{item.helpdesk || '-'}</td>
                       <td><span className={`dashboard-status ${itemStatus === 'open' ? 'status-active' : itemStatus === 'on_hold' ? 'status-pending' : 'status-closed'}`}><i />{itemStatusLabel}</span></td>
                       <td>{formatRelativeTime(item.created_at)}</td>
@@ -916,7 +933,7 @@ function ClientDashboardPage() {
   return (
     <main className="client-dashboard">
       <aside className={`dashboard-sidebar ${menuOpen ? 'dashboard-sidebar-open' : ''}`}>
-        <a className="dashboard-brand" href="/">
+        <a className="dashboard-brand" href="/dashboard" onClick={(event) => { event.preventDefault(); openPage('dashboard') }}>
           <span className="dashboard-brand-mark"><Cloud size={22} /></span>
           <span>Sangatta <b>Cloud</b><i>.</i></span>
         </a>
@@ -933,6 +950,7 @@ function ClientDashboardPage() {
               <Icon size={18} />
               <span>{label}</span>
               {id === 'invoices' && <span className="dashboard-nav-count">1</span>}
+              {id === 'support' && supportUnread > 0 && <span className="dashboard-nav-count">{supportUnread}</span>}
             </button>
           ))}
         </nav>
@@ -959,9 +977,12 @@ function ClientDashboardPage() {
             <input aria-label="Cari" placeholder="Cari layanan, tagihan..." />
             <kbd>⌘ K</kbd>
           </div>
-          <button className="dashboard-icon-button" type="button" onClick={() => setNotice('Notifikasi akan tersedia setelah dashboard terhubung ke FossBilling.')} aria-label="Notifikasi">
-            <Bell size={18} /><span />
-          </button>
+          <NotificationBell
+            notifications={notifications}
+            open={bellOpen}
+            onOpenChange={setBellOpen}
+            onSelect={(item) => { markTicketRead(item.ticketId); openPage('support'); setActiveTicketId(String(item.ticketId)) }}
+          />
           <div className="dashboard-account-menu-wrap" onBlur={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget)) setAccountMenuOpen(false)
           }} onKeyDown={(event) => {
@@ -979,7 +1000,7 @@ function ClientDashboardPage() {
                   setAccountMenuOpen(false)
                   openPage('profile')
                 }}><UserRound size={15} /> Profil</button>
-                <button type="button" role="menuitem" className="dashboard-account-menu-logout" onClick={handleLogout} disabled={isLoggingOut}><LogOut size={15} /> {isLoggingOut ? 'Keluar...' : 'Logout'}</button>
+                <button type="button" role="menuitem" className="dashboard-account-menu-logout" onClick={handleLogout} disabled={isLoggingOut}><LogOut size={15} /> {isLoggingOut ? 'Keluar...' : 'Keluar'}</button>
               </div>
             )}
           </div>

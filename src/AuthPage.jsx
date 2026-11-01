@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -7,6 +7,7 @@ import {
   Eye,
   EyeOff,
   LockKeyhole,
+  LoaderCircle,
   Mail,
   ShieldCheck,
   Sparkles,
@@ -16,23 +17,133 @@ function GoogleMark() {
   return <span className="google-mark" aria-hidden="true">G</span>
 }
 
+function friendlyAuthError(message) {
+  const normalized = message.trim().toLowerCase()
+
+  if (/email.*(already|exist|registered|taken)|(already|exist|registered|taken).*email/.test(normalized)) {
+    return 'Email ini sudah terdaftar. Coba masuk atau gunakan alamat email lain.'
+  }
+  if (/please check your login details|check.*(login details|credentials)/.test(normalized)) {
+    return 'Email atau kata sandi tidak sesuai. Periksa kembali lalu coba lagi.'
+  }
+  if (/invalid.*(email|password)|(email|password).*(invalid|incorrect|wrong)|credentials/.test(normalized)) {
+    return 'Email atau kata sandi tidak sesuai. Periksa kembali lalu coba lagi.'
+  }
+  if (/csrf|session expired|sesi kedaluwarsa/.test(normalized)) {
+    return 'Sesi formulir sudah kedaluwarsa. Muat ulang halaman lalu coba lagi.'
+  }
+  if (/password.*(confirm|match)|confirm.*password/.test(normalized)) {
+    return 'Konfirmasi kata sandi belum sesuai.'
+  }
+  if (/email/.test(normalized) && /(valid|format|required|empty)/.test(normalized)) {
+    return 'Masukkan alamat email yang valid.'
+  }
+  if (/networkerror|failed to fetch|fetch failed/.test(normalized)) {
+    return 'Tidak dapat terhubung ke layanan akun. Periksa koneksi internet lalu coba lagi.'
+  }
+
+  return message || 'Layanan akun sedang tidak tersedia. Coba lagi nanti.'
+}
+
 function AuthPage({ mode = 'login' }) {
   const isSignup = mode === 'signup'
   const [showPassword, setShowPassword] = useState(false)
   const [notice, setNotice] = useState('')
+  const [noticeType, setNoticeType] = useState('error')
+  const [csrfToken, setCsrfToken] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isRedirecting, setIsRedirecting] = useState(false)
 
-  const handleSubmit = (event) => {
+  useEffect(() => {
+    if (!isRedirecting) return undefined
+
+    const timeout = window.setTimeout(() => window.location.assign('/dashboard'), 1400)
+    return () => window.clearTimeout(timeout)
+  }, [isRedirecting])
+
+  useEffect(() => {
+    const controller = new AbortController()
+
+    fetch('/api/fossbilling-auth.php?action=status', { signal: controller.signal })
+      .then(async (response) => {
+        const result = await response.json()
+        if (!response.ok || typeof result.csrfToken !== 'string') {
+          throw new Error(result.error || 'Sesi tidak dapat disiapkan. Muat ulang halaman.')
+        }
+        setCsrfToken(result.csrfToken)
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setNotice(error.message || 'Sesi tidak dapat disiapkan. Muat ulang halaman.')
+        }
+      })
+
+    return () => controller.abort()
+  }, [])
+
+  const handleSubmit = async (event) => {
     event.preventDefault()
     const formData = new FormData(event.currentTarget)
     if (isSignup && formData.get('password') !== formData.get('password_confirm')) {
+      setNoticeType('error')
       setNotice('Konfirmasi kata sandi belum sama.')
       return
     }
-    setNotice('Form ini belum terhubung ke FossBilling. Data belum dikirim.')
+
+    if (!csrfToken) {
+      setNoticeType('error')
+      setNotice('Sesi belum siap. Muat ulang halaman lalu coba lagi.')
+      return
+    }
+
+    const payload = Object.fromEntries(formData.entries())
+    delete payload.remember
+    setIsSubmitting(true)
+    setNotice('')
+    try {
+      const response = await fetch(`/api/fossbilling-auth.php?action=${isSignup ? 'create' : 'login'}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+        body: JSON.stringify(payload),
+      })
+      const result = await response.json()
+      if (!response.ok || result.result !== true || result.error !== null) {
+        const errorMessage = typeof result.error === 'string'
+          ? result.error
+          : result.error?.message
+        throw new Error(errorMessage || 'Permintaan tidak dapat diproses. Coba lagi.')
+      }
+
+      setIsRedirecting(true)
+    } catch (error) {
+      setNoticeType('error')
+      setNotice(friendlyAuthError(error.message))
+    } finally {
+      setIsSubmitting(false)
+    }
   }
 
   const handleGoogle = () => {
+    setNoticeType('error')
     setNotice('Google OAuth belum dikonfigurasi. Tidak ada data yang dikirim.')
+  }
+
+  if (isRedirecting) {
+    return (
+      <main className="auth-loading-screen" role="status" aria-live="polite">
+        <div className="auth-loading-card">
+          <span className="auth-loading-mark"><Cloud size={26} /></span>
+          <span className="auth-loading-spinner"><LoaderCircle size={23} /></span>
+          <span className="auth-card-kicker">{isSignup ? 'AKUN BERHASIL DIBUAT' : 'BERHASIL MASUK'}</span>
+          <h1>{isSignup ? 'Selamat datang!' : 'Senang melihatmu kembali.'}</h1>
+          <p>Menyiapkan dashboard pribadimu...</p>
+          <div className="auth-loading-progress"><span /></div>
+        </div>
+      </main>
+    )
   }
 
   return (
@@ -105,7 +216,7 @@ function AuthPage({ mode = 'login' }) {
               )}
 
               <label className="auth-field">
-                <span>Alamat email</span>
+                <span>Alamat email <b>*</b></span>
                 <span className="auth-input-wrap">
                   <Mail size={17} />
                   <input
@@ -118,20 +229,8 @@ function AuthPage({ mode = 'login' }) {
                 </span>
               </label>
 
-              {isSignup && (
-                <label className="auth-field">
-                  <span>Zona waktu</span>
-                  <select name="timezone" defaultValue="Asia/Makassar">
-                    <option value="Asia/Jakarta">Asia/Jakarta (WIB)</option>
-                    <option value="Asia/Makassar">Asia/Makassar (WITA)</option>
-                    <option value="Asia/Jayapura">Asia/Jayapura (WIT)</option>
-                  </select>
-                  <small>Digunakan untuk menampilkan tanggal dan waktu lokal.</small>
-                </label>
-              )}
-
               <label className="auth-field">
-                <span>{isSignup ? 'Kata sandi' : 'Kata sandi'}</span>
+                <span>Kata sandi <b>*</b></span>
                 <span className="auth-input-wrap">
                   <LockKeyhole size={17} />
                   <input
@@ -155,7 +254,7 @@ function AuthPage({ mode = 'login' }) {
 
               {isSignup ? (
                 <label className="auth-field">
-                  <span>Konfirmasi kata sandi</span>
+                  <span>Konfirmasi kata sandi <b>*</b></span>
                   <span className="auth-input-wrap">
                     <LockKeyhole size={17} />
                     <input
@@ -178,9 +277,9 @@ function AuthPage({ mode = 'login' }) {
                 </div>
               )}
 
-              <button className="auth-primary-button" type="submit">
-                {isSignup ? 'Buat akun' : 'Masuk'}
-                <ArrowRight size={17} />
+              <button className="auth-primary-button" type="submit" disabled={!csrfToken || isSubmitting}>
+                {isSubmitting ? 'Memproses...' : isSignup ? 'Buat akun' : 'Masuk'}
+                {!isSubmitting && <ArrowRight size={17} />}
               </button>
             </form>
 
@@ -190,7 +289,11 @@ function AuthPage({ mode = 'login' }) {
               {isSignup ? 'Daftar dengan Google' : 'Lanjutkan dengan Google'}
             </button>
 
-            {notice && <p className="auth-notice" role="status">{notice}</p>}
+            {notice && (
+              <p className={`auth-notice ${noticeType === 'success' ? 'auth-notice-success' : ''}`} role="status">
+                {notice}
+              </p>
+            )}
 
             <p className="auth-switch">
               {isSignup ? 'Sudah punya akun?' : 'Belum punya akun?'}

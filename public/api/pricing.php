@@ -96,9 +96,9 @@ function validPrice(mixed $value): int|float|null
     return $price;
 }
 
-$baseUrl = getenv('FOSSBILLING_BASE_URL');
-if (!is_string($baseUrl) || trim($baseUrl) === '' || !function_exists('curl_init')) {
-    failPricing('FOSSBILLING_BASE_URL is missing or the PHP cURL extension is unavailable.');
+$baseUrl = getenv('FOSSBILLING_BASE_URL') ?: 'http://localhost:8086';
+if (!function_exists('curl_init')) {
+    failPricing('The PHP cURL extension is unavailable.');
 }
 
 $baseUrl = rtrim(trim($baseUrl), '/');
@@ -107,12 +107,12 @@ $host = is_array($parts) ? ($parts['host'] ?? '') : '';
 $scheme = is_array($parts) ? strtolower((string) ($parts['scheme'] ?? '')) : '';
 $isPrivateIp = filter_var($host, FILTER_VALIDATE_IP) !== false
     && filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false;
-$isLoopbackIp = in_array($host, ['127.0.0.1', '::1'], true);
+$isLoopbackHost = in_array(strtolower((string) $host), ['localhost', '127.0.0.1', '::1'], true);
 
 if (
     !is_array($parts)
     || !in_array($scheme, ['https', 'http'], true)
-    || ($scheme !== 'https' && !$isPrivateIp && !$isLoopbackIp)
+    || ($scheme !== 'https' && !$isPrivateIp && !$isLoopbackHost)
     || isset($parts['user'])
     || isset($parts['pass'])
     || isset($parts['query'])
@@ -120,7 +120,7 @@ if (
     || !in_array($parts['path'] ?? '', ['', '/'], true)
     || $host === ''
 ) {
-    failPricing('FOSSBILLING_BASE_URL must be HTTPS, or HTTP on a private/loopback IP, with no path or credentials.');
+    failPricing('FOSSBILLING_BASE_URL must be HTTPS, or HTTP on a private IP or loopback host, with no path or credentials.');
 }
 
 $currency = getenv('PRICING_CURRENCY') ?: 'IDR';

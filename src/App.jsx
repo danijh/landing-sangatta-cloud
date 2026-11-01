@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { NotificationBell, useNotifications } from './notifications.jsx'
 import {
   ArrowDown,
   ArrowDownRight,
@@ -9,6 +10,7 @@ import {
   Cloud,
   FileText,
   Globe2,
+  LogOut,
   HeartHandshake,
   LockKeyhole,
   Menu,
@@ -16,6 +18,7 @@ import {
   ShieldCheck,
   Sparkles,
   UsersRound,
+  UserRound,
   X,
 } from 'lucide-react'
 import InfoPage from './InfoPage.jsx'
@@ -49,7 +52,7 @@ const content = {
     save: 'Hemat 2 bulan',
     perMonth: '/ bln',
     billedYearly: 'ditagih tahunan',
-    perYear: '/ tahun',
+    perYear: '/ thn',
     users: 'pengguna',
     choose: 'Pilih paket',
     popular: 'Favorit banyak orang',
@@ -198,12 +201,25 @@ const content = {
   },
 }
 
-const formatPrice = (amount, currency, language) =>
-  new Intl.NumberFormat(language === 'id' ? 'id-ID' : 'en-GB', {
-    style: 'currency',
-    currency,
-    maximumFractionDigits: 0,
-  }).format(amount)
+const formatPriceParts = (amount, currency, language) => {
+  const locale = language === 'id' ? 'id-ID' : 'en-GB'
+  const truncate = (value, digits) => {
+    const factor = 10 ** digits
+    return Math.floor(value * factor + 1e-6) / factor
+  }
+  const number = (value, digits) =>
+    new Intl.NumberFormat(locale, { maximumFractionDigits: digits }).format(truncate(value, digits))
+  const units = language === 'id' ? { k: 'rb-an', m: 'jt-an' } : { k: 'K+', m: 'M+' }
+
+  if (amount >= 1_000_000) return { currency, value: number(amount / 1_000_000, 2), unit: units.m }
+  if (amount >= 1_000) return { currency, value: number(amount / 1_000, 0), unit: units.k }
+  return { currency, value: number(amount, 0), unit: '' }
+}
+
+const formatPrice = (amount, currency, language) => {
+  const { value, unit } = formatPriceParts(amount, currency, language)
+  return [currency, value, unit].filter(Boolean).join(' ')
+}
 
 function LandingPage() {
   const [language, setLanguage] = useState('id')
@@ -212,7 +228,35 @@ function LandingPage() {
   const [currency, setCurrency] = useState('IDR')
   const [priceState, setPriceState] = useState('loading')
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [sessionClient, setSessionClient] = useState(null)
+  const [csrfToken, setCsrfToken] = useState('')
+  const [bellOpen, setBellOpen] = useState(false)
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [isLoggingOut, setIsLoggingOut] = useState(false)
+  const notifications = useNotifications({ enabled: Boolean(sessionClient), clientId: sessionClient?.id })
   const t = content[language]
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('/api/fossbilling-auth.php?action=status', { credentials: 'same-origin', signal: controller.signal })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((result) => {
+        if (result?.authenticated) {
+          setSessionClient(result.client || {})
+          setCsrfToken(result.csrfToken || '')
+        }
+      })
+      .catch(() => {})
+    return () => controller.abort()
+  }, [])
+
+  const clientName = sessionClient
+    ? sessionClient.name
+      || [sessionClient.first_name, sessionClient.last_name].filter(Boolean).join(' ')
+      || sessionClient.email?.split('@')[0]
+      || 'Pelanggan'
+    : ''
+  const clientInitials = clientName.split(/\s+/).slice(0, 2).map((part) => part[0]).join('')
 
   const loadPlans = async () => {
     setPriceState('loading')
@@ -246,6 +290,27 @@ function LandingPage() {
   }, [language, t.title])
 
   const closeMenu = () => setMobileMenuOpen(false)
+
+  const handleLogout = async () => {
+    setIsLoggingOut(true)
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'X-CSRF-Token': csrfToken },
+      })
+      const result = await response.json()
+      if (!response.ok || result.result !== true) throw new Error('Logout failed')
+      setSessionClient(null)
+      setCsrfToken('')
+      setAccountMenuOpen(false)
+      setBellOpen(false)
+    } catch (error) {
+      console.error('Unable to sign out:', error)
+    } finally {
+      setIsLoggingOut(false)
+    }
+  }
 
   return (
     <div className="min-h-screen overflow-hidden bg-[#fbfaf8] text-ink">
@@ -282,13 +347,50 @@ function LandingPage() {
                 <span>{language === 'id' ? 'ID' : 'EN'}</span>
                 <ChevronDown size={13} />
               </button>
-              <a className="nav-sign-in" href="/login" onClick={closeMenu}>
-                {t.signIn}
-              </a>
-              <a className="button button-dark nav-cta" href="/signup" onClick={closeMenu}>
-                {t.getStarted}
-                <ArrowUpRight size={15} />
-              </a>
+              {sessionClient ? (
+                <>
+                  <NotificationBell
+                    notifications={notifications}
+                    open={bellOpen}
+                    onOpenChange={setBellOpen}
+                    onSelect={(item) => {
+                      notifications.markTicketRead(item.ticketId)
+                      window.location.assign(`/dashboard#ticket-${item.ticketId}`)
+                    }}
+                  />
+                  <div className="nav-account-wrap" onBlur={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget)) setAccountMenuOpen(false)
+                  }} onKeyDown={(event) => {
+                    if (event.key === 'Escape') setAccountMenuOpen(false)
+                  }}>
+                    <button className="nav-user" type="button" aria-haspopup="menu" aria-expanded={accountMenuOpen} onClick={() => setAccountMenuOpen((open) => !open)}>
+                      <span className="nav-user-avatar">{clientInitials}</span>
+                      <span>{clientName}</span>
+                      <ChevronDown size={13} />
+                    </button>
+                    {accountMenuOpen && (
+                      <div className="dashboard-account-menu" role="menu">
+                        <a className="nav-account-item" role="menuitem" href="/dashboard#profile" onClick={closeMenu}><UserRound size={15} /> Profil</a>
+                        <button type="button" role="menuitem" className="dashboard-account-menu-logout" onClick={handleLogout} disabled={isLoggingOut}><LogOut size={15} /> {isLoggingOut ? 'Keluar...' : 'Keluar'}</button>
+                      </div>
+                    )}
+                  </div>
+                  <a className="button button-dark nav-cta" href="/dashboard" onClick={closeMenu}>
+                    Dashboard
+                    <ArrowUpRight size={15} />
+                  </a>
+                </>
+              ) : (
+                <>
+                  <a className="nav-sign-in" href="/login" onClick={closeMenu}>
+                    {t.signIn}
+                  </a>
+                  <a className="button button-dark nav-cta" href="/signup" onClick={closeMenu}>
+                    {t.getStarted}
+                    <ArrowUpRight size={15} />
+                  </a>
+                </>
+              )}
             </div>
           </nav>
 
@@ -483,7 +585,7 @@ function LandingPage() {
                   </div>
                 )}
                 <div className="mt-8 grid gap-5 md:grid-cols-3">
-                  {plans.map((plan) => {
+                  {plans.map((plan, index) => {
                     const isYearly = billing === 'yearly'
                     const localizedPlan = plan.translations?.[language] ?? plan
                     const planFeatures = localizedPlan.features ?? plan.features ?? []
@@ -492,13 +594,15 @@ function LandingPage() {
                       currency,
                       language,
                     )
-                    const monthlyEquivalent = isYearly
-                      ? formatPrice(Math.round(plan.annual_price / 12), currency, language)
-                      : null
+                    const mainPrice = formatPriceParts(
+                      isYearly ? Math.round(plan.annual_price / 12) : plan.monthly_price,
+                      currency,
+                      language,
+                    )
 
                     return (
                       <article
-                        className={`plan-card ${plan.featured ? 'plan-card-featured' : ''}`}
+                        className={`plan-card plan-tone-${index % 3} ${plan.featured ? 'plan-card-featured' : ''}`}
                         key={plan.id}
                       >
                         {plan.featured && <span className="plan-ribbon">{t.popular}</span>}
@@ -506,19 +610,23 @@ function LandingPage() {
                           <span className="plan-name">{localizedPlan.name}</span>
                           {plan.storage && <span className="plan-storage">{plan.storage}</span>}
                         </div>
-                        <p className="mt-3 min-h-10 text-[13px] leading-5 text-ink/55">
+                        <p className="plan-desc mt-3 min-h-10 text-[13px] leading-5">
                           {localizedPlan.description}
                         </p>
-                        <div className="mt-5 flex items-end gap-1">
-                          <span className="plan-price">{monthlyEquivalent || price}</span>
-                          <span className="mb-1 text-xs text-ink/50">{t.perMonth}</span>
+                        <div className="mt-5 flex flex-wrap items-baseline gap-x-1.5">
+                          <span className="plan-price">
+                            <span className="plan-price-text">{mainPrice.currency}</span>
+                            <span className="plan-price-value">{mainPrice.value}</span>
+                            {mainPrice.unit && <span className="plan-price-text">{mainPrice.unit}</span>}
+                          </span>
+                          <span className="plan-per text-xs">{t.perMonth}</span>
                         </div>
                         {isYearly ? (
-                          <p className="mt-1 text-[11px] text-ink/45">
+                          <p className="plan-note mt-1 text-[11px]">
                             {price} {t.perYear} · {t.billedYearly}
                           </p>
                         ) : (
-                          <p className="mt-1 text-[11px] text-ink/45">
+                          <p className="plan-note mt-1 text-[11px]">
                             {language === 'id' ? 'Tagihan bulanan' : 'Billed monthly'}
                           </p>
                         )}
