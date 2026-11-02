@@ -808,7 +808,7 @@ if ($action === 'ticket' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
-if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'notification-state'], true)
+if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state'], true)
     || $_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(['error' => 'Permintaan tidak valid.'], 405);
 }
@@ -817,7 +817,7 @@ if (!csrfIsValid()) {
     respond(['error' => 'Sesi kedaluwarsa. Muat ulang halaman lalu coba lagi.'], 403);
 }
 
-if (in_array($action, ['logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'notification-state'], true)
+if (in_array($action, ['logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state'], true)
     && empty($_SESSION['fossbilling_authenticated'])) {
     respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
 }
@@ -919,6 +919,16 @@ try {
             throw new RuntimeException('FossBilling returned an unexpected ticket response.');
         }
         respond(['result' => (int) $ticketId, 'error' => null]);
+    }
+
+    if ($action === 'storage-url') {
+        $result = callFossBillingClient('nextcloud/sso_url', []);
+        $url = $result['result']['url'] ?? null;
+        if (!is_string($url) || preg_match('#^https?://#', $url) !== 1) {
+            respond(['error' => 'Storage Area tidak tersedia saat ini.'], 502);
+        }
+
+        respond(['result' => true, 'url' => $url, 'error' => null]);
     }
 
     if ($action === 'ticket-close') {

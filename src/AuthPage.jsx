@@ -45,6 +45,22 @@ function friendlyAuthError(message) {
   return message || 'Layanan akun sedang tidak tersedia. Coba lagi nanti.'
 }
 
+const wantsStorage = () => new URLSearchParams(window.location.search).get('next') === 'storage'
+
+async function openStorageArea(csrfToken) {
+  const response = await fetch('/api/fossbilling-auth.php?action=storage-url', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+    body: '{}',
+  })
+  const result = await response.json().catch(() => null)
+  if (!response.ok || typeof result?.url !== 'string') {
+    throw new Error(result?.error || 'Storage Area tidak dapat dibuka.')
+  }
+  window.location.assign(result.url)
+}
+
 function AuthPage({ mode = 'login' }) {
   const isSignup = mode === 'signup'
   const [showPassword, setShowPassword] = useState(false)
@@ -56,6 +72,8 @@ function AuthPage({ mode = 'login' }) {
 
   useEffect(() => {
     if (!isRedirecting) return undefined
+
+    if (wantsStorage()) return undefined
 
     const timeout = window.setTimeout(() => window.location.assign('/dashboard'), 1400)
     return () => window.clearTimeout(timeout)
@@ -71,9 +89,14 @@ function AuthPage({ mode = 'login' }) {
           throw new Error(result.error || 'Sesi tidak dapat disiapkan. Muat ulang halaman.')
         }
         setCsrfToken(result.csrfToken)
+        if (mode === 'login' && result.authenticated === true && wantsStorage()) {
+          setIsRedirecting(true)
+          await openStorageArea(result.csrfToken)
+        }
       })
       .catch((error) => {
         if (error.name !== 'AbortError') {
+          setIsRedirecting(false)
           setNotice(error.message || 'Sesi tidak dapat disiapkan. Muat ulang halaman.')
         }
       })
@@ -118,7 +141,13 @@ function AuthPage({ mode = 'login' }) {
       }
 
       setIsRedirecting(true)
+      if (!isSignup && wantsStorage()) {
+        const status = await fetch('/api/fossbilling-auth.php?action=status', { credentials: 'same-origin' })
+        const statusResult = await status.json()
+        await openStorageArea(statusResult.csrfToken)
+      }
     } catch (error) {
+      setIsRedirecting(false)
       setNoticeType('error')
       setNotice(friendlyAuthError(error.message))
     } finally {
@@ -139,7 +168,7 @@ function AuthPage({ mode = 'login' }) {
           <span className="auth-loading-spinner"><LoaderCircle size={23} /></span>
           <span className="auth-card-kicker">{isSignup ? 'AKUN BERHASIL DIBUAT' : 'BERHASIL MASUK'}</span>
           <h1>{isSignup ? 'Selamat datang!' : 'Senang melihatmu kembali.'}</h1>
-          <p>Menyiapkan dashboard pribadimu...</p>
+          <p>{wantsStorage() ? 'Membuka Storage Area...' : 'Menyiapkan dashboard pribadimu...'}</p>
           <div className="auth-loading-progress"><span /></div>
         </div>
       </main>

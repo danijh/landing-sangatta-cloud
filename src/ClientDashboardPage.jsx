@@ -475,6 +475,28 @@ function ClientDashboardPage() {
     }
   }
 
+  const handleOpenStorage = async () => {
+    const tab = window.open('', '_blank')
+    setNotice('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=storage-url', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: '{}',
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || typeof result?.url !== 'string') {
+        throw new Error(result?.error || 'Storage Area tidak dapat dibuka.')
+      }
+      if (tab) tab.location.href = result.url
+      else window.location.href = result.url
+    } catch (error) {
+      if (tab) tab.close()
+      setNotice(error.message)
+    }
+  }
+
   const handleTicketClose = async () => {
     if (!window.confirm('Tutup tiket ini? Tiket yang sudah ditutup tidak dapat dibuka kembali.')) return
     setIsClosingTicket(true)
@@ -981,6 +1003,10 @@ function ClientDashboardPage() {
               {id === 'support' && supportUnread > 0 && <span className="dashboard-nav-count">{supportUnread}</span>}
             </button>
           ))}
+          <button className="dashboard-nav-link" type="button" onClick={handleOpenStorage}>
+            <HardDrive size={18} />
+            <span>Storage Area</span>
+          </button>
         </nav>
         <div className="dashboard-sidebar-balance"><span>Saldo akun</span><strong>Rp250.000</strong></div>
         <div className="dashboard-sidebar-bottom">
