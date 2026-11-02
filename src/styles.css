@@ -5082,3 +5082,22 @@ a {
   display: flex;
   gap: 8px;
 }
+
+.dashboard-notification-panel li.is-unread button strong,
+.dashboard-ticket-link.is-unread {
+  font-weight: 800;
+}
+
+.dashboard-notification-panel li:not(.is-unread) button strong {
+  font-weight: 400;
+}
+
+.dashboard-icon-button > .dashboard-bell-dot {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.5;
+  }
+}

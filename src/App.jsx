@@ -233,7 +233,7 @@ function LandingPage() {
   const [bellOpen, setBellOpen] = useState(false)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
-  const notifications = useNotifications({ enabled: Boolean(sessionClient), clientId: sessionClient?.id })
+  const notifications = useNotifications({ enabled: Boolean(sessionClient), csrfToken })
   const t = content[language]
 
   useEffect(() => {

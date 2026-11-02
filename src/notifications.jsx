@@ -1,16 +1,30 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Bell } from 'lucide-react'
 
-export function useNotifications({ enabled, clientId, onNew }) {
+const mergeRead = (current, incoming) => {
+  const next = { ...current }
+  let changed = false
+  Object.entries(incoming || {}).forEach(([ticketId, id]) => {
+    if (Number(id) > (next[ticketId] || 0)) {
+      next[ticketId] = Number(id)
+      changed = true
+    }
+  })
+  return changed ? next : current
+}
+
+export function useNotifications({ enabled, csrfToken, onNew }) {
   const [notifications, setNotifications] = useState([])
   const [readByTicket, setReadByTicket] = useState({})
   const [clearedId, setClearedId] = useState(0)
-  const storageKey = clientId ? `notification-read-${clientId}` : ''
+  const tokenRef = useRef(csrfToken)
+  tokenRef.current = csrfToken
 
   useEffect(() => {
     if (!enabled) return undefined
 
     let lastId = 0
+    let isFirstPoll = true
     let stopped = false
 
     const poll = async () => {
@@ -24,12 +38,16 @@ export function useNotifications({ enabled, clientId, onNew }) {
         }
         const result = await response.json()
         if (!response.ok || !Array.isArray(result.items)) return
-        const isFirstPoll = lastId === 0
         lastId = result.lastId
+        if (result.state) {
+          setReadByTicket((current) => mergeRead(current, result.state.read))
+          setClearedId((current) => Math.max(current, Number(result.state.cleared) || 0))
+        }
         if (result.items.length > 0) {
           setNotifications((current) => [...current, ...result.items].slice(-50))
-          if (!isFirstPoll) onNew?.()
+          if (!isFirstPoll) onNew?.(result.items)
         }
+        isFirstPoll = false
       } catch {
         // Retry on the next interval.
       }
@@ -49,25 +67,14 @@ export function useNotifications({ enabled, clientId, onNew }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled])
 
-  useEffect(() => {
-    if (!storageKey) return
-    try {
-      const saved = JSON.parse(localStorage.getItem(storageKey) || '{}')
-      setReadByTicket(saved.read && typeof saved.read === 'object' ? saved.read : {})
-      setClearedId(Number(saved.cleared) || 0)
-    } catch {
-      // Ignore unreadable storage.
-    }
-  }, [storageKey])
-
-  useEffect(() => {
-    if (!storageKey) return
-    try {
-      localStorage.setItem(storageKey, JSON.stringify({ read: readByTicket, cleared: clearedId }))
-    } catch {
-      // Storage may be unavailable.
-    }
-  }, [storageKey, readByTicket, clearedId])
+  const saveState = (state) => {
+    fetch('/api/fossbilling-auth.php?action=notification-state', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': tokenRef.current },
+      body: JSON.stringify(state),
+    }).catch(() => {})
+  }
 
   const visible = notifications.filter((item) => item.id > clearedId)
   const isUnread = (item) => item.id > (readByTicket[item.ticketId] || 0)
@@ -80,9 +87,16 @@ export function useNotifications({ enabled, clientId, onNew }) {
     unreadTicketIds: new Set(unread.map((item) => String(item.ticketId))),
     markTicketRead: (ticketId) => {
       const latest = Math.max(0, ...notifications.filter((item) => String(item.ticketId) === String(ticketId)).map((item) => item.id))
-      if (latest > 0) setReadByTicket((current) => ({ ...current, [ticketId]: latest }))
+      if (latest <= (readByTicket[ticketId] || 0)) return
+      setReadByTicket((current) => ({ ...current, [ticketId]: latest }))
+      saveState({ read: { [ticketId]: latest } })
     },
-    clearAll: () => setClearedId(Math.max(0, ...visible.map((item) => item.id))),
+    clearAll: () => {
+      const latest = Math.max(0, ...visible.map((item) => item.id))
+      if (latest === 0) return
+      setClearedId(latest)
+      saveState({ cleared: latest })
+    },
   }
 }
 
@@ -100,7 +114,7 @@ export function NotificationBell({ notifications, open, onOpenChange, onSelect }
       if (event.key === 'Escape') onOpenChange(false)
     }}>
       <button className="dashboard-icon-button" type="button" aria-label="Notifikasi" aria-haspopup="true" aria-expanded={open} onClick={() => onOpenChange(!open)}>
-        <Bell size={18} />{unreadCount > 0 && <span />}
+        <Bell size={18} />{unreadCount > 0 && <span className="dashboard-bell-dot" />}
       </button>
       {open && (
         <div className="dashboard-notification-panel">
@@ -111,10 +125,10 @@ export function NotificationBell({ notifications, open, onOpenChange, onSelect }
           {visible.length === 0 ? <p>Belum ada notifikasi.</p> : (
             <ul>
               {[...visible].reverse().map((item) => (
-                <li key={item.id}>
+                <li key={item.id} className={isUnread(item) ? 'is-unread' : undefined}>
                   <button type="button" onClick={() => onSelect(item)}>
                     {isUnread(item) && <i className="dashboard-unread-dot" aria-label="Belum dibaca" />}
-                    <span>Balasan baru pada tiket</span>
+                    <span>{item.type === 'closed' ? 'Tiket ditutup oleh admin' : 'Balasan baru pada tiket'}</span>
                     <strong>{item.subject || `#${item.ticketId}`}</strong>
                     <small>{formatTime(item.createdAt)}</small>
                   </button>

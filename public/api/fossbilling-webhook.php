@@ -38,7 +38,7 @@ if (!hash_equals('sha256=' . hash_hmac('sha256', $raw, $secret), $signature)) {
 
 $payload = json_decode($raw, true);
 if (!is_array($payload)
-    || ($payload['event'] ?? '') !== 'onAfterAdminReplyTicket'
+    || !in_array($payload['event'] ?? '', ['onAfterAdminReplyTicket', 'onAfterAdminCloseTicket'], true)
     || !is_int($payload['timestamp'] ?? null)
     || abs(time() - $payload['timestamp']) > 300
     || !is_array($payload['data'] ?? null)) {
@@ -70,6 +70,7 @@ $lastId = $items === [] ? 0 : (int) end($items)['id'];
 $items[] = [
     'id' => $lastId + 1,
     'ticketId' => $ticketId,
+    'type' => $payload['event'] === 'onAfterAdminCloseTicket' ? 'closed' : 'reply',
     'subject' => substr(is_string($data['subject'] ?? null) ? $data['subject'] : '', 0, 200),
     'createdAt' => time(),
 ];

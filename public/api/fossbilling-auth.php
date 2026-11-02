@@ -23,6 +23,22 @@ function respond(array $body, int $status = 200): never
     exit;
 }
 
+function notificationStatePath(string $storageDirectory, int $clientId): string
+{
+    return $storageDirectory . '/notifications/' . $clientId . '.state.json';
+}
+
+function readNotificationState(string $storageDirectory, int $clientId): array
+{
+    $file = notificationStatePath($storageDirectory, $clientId);
+    $state = is_file($file) ? json_decode((string) file_get_contents($file), true) : null;
+    $read = is_array($state) && is_array($state['read'] ?? null) ? $state['read'] : [];
+    return [
+        'read' => (object) $read,
+        'cleared' => is_array($state) ? (int) ($state['cleared'] ?? 0) : 0,
+    ];
+}
+
 function csrfIsValid(): bool
 {
     $provided = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
@@ -728,15 +744,16 @@ if ($action === 'notifications' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     $stored = is_file($file) ? json_decode((string) file_get_contents($file), true) : [];
     $stored = is_array($stored) ? $stored : [];
     $lastId = $stored === [] ? 0 : (int) end($stored)['id'];
+    $state = readNotificationState($storageDirectory, (int) $clientId);
 
-    // Without "after" the caller only learns the current position, so old items are not replayed.
     if (!isset($_GET['after']) || !is_string($_GET['after']) || preg_match('/^[0-9]{1,18}$/', $_GET['after']) !== 1) {
-        respond(['items' => [], 'lastId' => $lastId]);
+        respond(['items' => [], 'lastId' => $lastId, 'state' => $state]);
     }
 
     $after = (int) $_GET['after'];
+    // The first poll (after=0) returns the full history so read/cleared state can be applied to it.
     $items = array_values(array_filter($stored, static fn ($item) => (int) $item['id'] > $after));
-    respond(['items' => $items, 'lastId' => max($lastId, $after)]);
+    respond(['items' => $items, 'lastId' => max($lastId, $after), 'state' => $state]);
 }
 
 if ($action === 'ticket' && $_SERVER['REQUEST_METHOD'] === 'GET') {
@@ -791,7 +808,7 @@ if ($action === 'ticket' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
-if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close'], true)
+if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'notification-state'], true)
     || $_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(['error' => 'Permintaan tidak valid.'], 405);
 }
@@ -800,9 +817,58 @@ if (!csrfIsValid()) {
     respond(['error' => 'Sesi kedaluwarsa. Muat ulang halaman lalu coba lagi.'], 403);
 }
 
-if (in_array($action, ['logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close'], true)
+if (in_array($action, ['logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'notification-state'], true)
     && empty($_SESSION['fossbilling_authenticated'])) {
     respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+}
+
+if ($action === 'notification-state') {
+    $clientId = $_SESSION['fossbilling_client']['id'] ?? null;
+    if (!(is_int($clientId) || is_string($clientId)) || preg_match('/^[0-9]{1,18}$/', (string) $clientId) !== 1) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+    $clientId = (int) $clientId;
+    session_write_close();
+
+    $body = json_decode((string) file_get_contents('php://input', false, null, 0, 65537), true);
+    if (!is_array($body)) {
+        respond(['error' => 'Permintaan tidak valid.'], 422);
+    }
+
+    $directory = $storageDirectory . '/notifications';
+    if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+        respond(['error' => 'Status notifikasi tidak dapat disimpan.'], 500);
+    }
+    $handle = fopen(notificationStatePath($storageDirectory, $clientId), 'c+');
+    if ($handle === false || !flock($handle, LOCK_EX)) {
+        respond(['error' => 'Status notifikasi tidak dapat disimpan.'], 500);
+    }
+
+    $state = json_decode(stream_get_contents($handle) ?: '{}', true);
+    $read = is_array($state) && is_array($state['read'] ?? null) ? $state['read'] : [];
+    $cleared = is_array($state) ? (int) ($state['cleared'] ?? 0) : 0;
+
+    // Values only move forward, so a stale device cannot un-read or restore notifications.
+    if (is_array($body['read'] ?? null)) {
+        foreach ($body['read'] as $ticketId => $id) {
+            if (preg_match('/^[0-9]{1,18}$/', (string) $ticketId) === 1 && is_int($id) && $id > 0) {
+                $read[(string) $ticketId] = max((int) ($read[(string) $ticketId] ?? 0), $id);
+            }
+        }
+        $read = array_slice($read, -200, null, true);
+    }
+    if (is_int($body['cleared'] ?? null)) {
+        $cleared = max($cleared, $body['cleared']);
+    }
+
+    ftruncate($handle, 0);
+    rewind($handle);
+    fwrite($handle, json_encode(['read' => (object) $read, 'cleared' => $cleared]));
+    fflush($handle);
+    flock($handle, LOCK_UN);
+    fclose($handle);
+
+    respond(['read' => (object) $read, 'cleared' => $cleared]);
 }
 
 if ($action === 'logout') {

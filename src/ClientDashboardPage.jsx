@@ -26,7 +26,7 @@ import {
   Quote,
   X,
 } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NotificationBell, useNotifications } from './notifications.jsx'
 
 const countryCodes = 'AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'.split(' ')
@@ -135,10 +135,31 @@ function ClientDashboardPage() {
   const [ticketListError, setTicketListError] = useState('')
   const [ticketListAttempt, setTicketListAttempt] = useState(0)
   const [bellOpen, setBellOpen] = useState(false)
+  const activeTicketIdRef = useRef(activeTicketId)
+  activeTicketIdRef.current = activeTicketId
   const notifications = useNotifications({
     enabled: authState === 'authenticated',
-    clientId: client.id,
-    onNew: () => setTicketListAttempt((attempt) => attempt + 1),
+    csrfToken,
+    onNew: (items) => {
+      setTicketListAttempt((attempt) => attempt + 1)
+      const openTicketId = activeTicketIdRef.current
+      if (!openTicketId) return
+      const related = items.filter((item) => String(item.ticketId) === String(openTicketId))
+      if (related.length === 0) return
+      if (related.some((item) => item.type === 'closed')) {
+        setTicket((current) => (current ? { ...current, status: 'closed' } : current))
+        setReplyOpen(false)
+        setReplyText('')
+      }
+      fetch(`/api/fossbilling-auth.php?action=ticket&id=${encodeURIComponent(openTicketId)}`, { credentials: 'same-origin' })
+        .then(async (response) => {
+          const result = await response.json().catch(() => null)
+          if (response.ok && result?.ticket && Array.isArray(result.ticket.messages) && String(activeTicketIdRef.current) === String(openTicketId)) {
+            setTicket(result.ticket)
+          }
+        })
+        .catch(() => {})
+    },
   })
 
   const servicesPerPage = 7
@@ -331,6 +352,13 @@ function ClientDashboardPage() {
   }
 
   const { unreadTicketIds, markTicketRead } = notifications
+  const activeTicketUnread = activePage === 'support' && Boolean(activeTicketId) && unreadTicketIds.has(String(activeTicketId))
+
+  useEffect(() => {
+    if (activeTicketUnread) markTicketRead(activeTicketId)
+    // markTicketRead is recreated every render; only the unread state should trigger this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTicketUnread, activeTicketId])
   const supportUnread = unreadTicketIds.size
 
   const customerName = profile?.name
@@ -766,7 +794,7 @@ function ClientDashboardPage() {
                   return (
                     <tr key={item.id}>
                       <td>#{item.id}</td>
-                      <td><button className="dashboard-ticket-link" type="button" onClick={openItem}>{unreadTicketIds.has(String(item.id)) && <i className="dashboard-unread-dot" aria-label="Belum dibaca" />}{item.subject}</button></td>
+                      <td><button className={`dashboard-ticket-link${unreadTicketIds.has(String(item.id)) ? ' is-unread' : ''}`} type="button" onClick={openItem}>{unreadTicketIds.has(String(item.id)) && <i className="dashboard-unread-dot" aria-label="Belum dibaca" />}{item.subject}</button></td>
                       <td>{item.helpdesk || '-'}</td>
                       <td><span className={`dashboard-status ${itemStatus === 'open' ? 'status-active' : itemStatus === 'on_hold' ? 'status-pending' : 'status-closed'}`}><i />{itemStatusLabel}</span></td>
                       <td>{formatRelativeTime(item.created_at)}</td>
