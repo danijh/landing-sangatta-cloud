@@ -150,7 +150,8 @@ Sebelum mempublikasikan:
 `/api/guest/product/get_list`. PHP di server website mengubah data `result.list`
 menjadi format yang dipakai frontend. Harga bulanan dan tahunan diambil dari
 `pricing.recurrent["1M"]` dan `pricing.recurrent["1Y"]`; produk tanpa kedua
-periode aktif atau tanpa harga valid tidak ditampilkan.
+periode aktif atau tanpa harga valid tidak ditampilkan. Menu Order di dashboard
+pelanggan menggunakan daftar produk dan harga yang sama melalui endpoint ini.
 
 Frontend hanya mengakses `/api/pricing.php` di domain website. Jangan panggil
 FossBilling langsung dari browser. Endpoint guest yang digunakan untuk daftar
@@ -159,6 +160,33 @@ token tidak dipakai untuk menampilkan harga; jangan pernah memasukkan token itu
 ke React, URL browser, atau file yang dipublikasikan. Jika kelak server perlu
 memanggil endpoint terproteksi, panggilan harus dibuat dari PHP dan token hanya
 disimpan sebagai environment variable rahasia di server.
+
+Produk dikelompokkan berdasarkan kategori (`product_category_id`); nama kategori
+diambil dari `/api/guest/product/category_get_pairs`, dan halaman depan serta
+dashboard menampilkan filter kategori jika ada lebih dari satu.
+
+Dashboard memanggil `/api/pricing.php?scope=dashboard` (hanya untuk pelanggan
+yang sudah masuk). Jika environment variable `FOSSBILLING_ADMIN_TOKEN` diatur di
+server, PHP memakai `/api/admin/product/get_list` (Basic auth `admin:<token>`)
+sehingga data produk sama dengan panel admin; produk berstatus `disabled`
+disembunyikan. Tanpa token, endpoint guest dipakai. Halaman depan publik selalu
+memakai endpoint guest, dan token tidak pernah dikirim ke browser.
+
+Keranjang di dashboard memakai sesi FossBilling milik pelanggan yang sedang
+masuk (`cart/get`, `cart/add_item`, `cart/remove_item` pada API guest, dipanggil
+dari `public/api/fossbilling-auth.php` dengan `action=cart`, `cart-add`, dan
+`cart-remove`). `/api/admin/cart/get_list` tidak dipakai karena mengembalikan
+keranjang semua pengunjung tanpa pemilik.
+
+Halaman checkout memuat metode pembayaran dari Komerce (`action=payment-methods`).
+Tombol Checkout memvalidasi metode yang dipilih, menjalankan `client/cart/checkout`
+dengan gateway `Komerce`, lalu membuat pembayaran Virtual Account lewat
+`POST /api/v1/user/payment/create` (nominal = total invoice + biaya VA Rp 4.440)
+dan menampilkan status dari `GET /api/v1/user/payment/status/{payment_id}`
+(`action=payment-status`). Server API membutuhkan env `KOMERCE_API_KEY`
+(opsional `KOMERCE_BASE_URL`, default sandbox) dan, agar callback aktif,
+`FOSSBILLING_PUBLIC_URL` (HTTPS publik). Pelanggan wajib mengisi nomor telepon
+di Profil. QRIS belum diproses. Jangan commit API key.
 
 Alamat dasar server FossBilling diatur melalui `FOSSBILLING_BASE_URL` (tanpa
 path `/api/...`), dengan default `http://localhost:8086`. Karena itu, saat

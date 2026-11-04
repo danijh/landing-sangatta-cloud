@@ -1,11 +1,14 @@
 import {
   ArrowDownToLine,
+  ArrowLeft,
   ArrowRight,
   BookOpen,
   ChevronDown,
   ChevronRight,
   CircleHelp,
+  Check,
   Cloud,
+  Copy,
   CreditCard,
   FileText,
   Gauge,
@@ -28,6 +31,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { NotificationBell, useNotifications } from './notifications.jsx'
+import { getPaymentGuide, guideMethodLabels } from './paymentGuides'
 
 const countryCodes = 'AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'.split(' ')
 const countryNames = new Intl.DisplayNames(['id'], { type: 'region' })
@@ -77,6 +81,92 @@ function formatCompactPrice(price) {
   return new Intl.NumberFormat('id-ID', { maximumFractionDigits: 2 }).format(amount)
 }
 
+const VA_ACCOUNT_NAME = 'PT Sangatta Cloud Media'
+
+function CopyVaButton({ value }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+  return (
+    <button className="dashboard-copy-button" type="button" onClick={copy} aria-label="Salin nomor VA" title={copied ? 'Tersalin' : 'Salin nomor VA'}>
+      {copied ? <Check size={16} /> : <Copy size={16} />}
+    </button>
+  )
+}
+
+function PaymentGuide({ bankCode }) {
+  const guide = getPaymentGuide(bankCode)
+  const [tab, setTab] = useState(0)
+  if (!guide) return null
+  const active = guide.methods[tab] || guide.methods[0]
+  return (
+    <div className="dashboard-payment-guide">
+      <div className="dashboard-payment-guide-notice">
+        <strong>Waspada Penipuan</strong>
+        <p>Pastikan nama merchant, nominal pembayaran, dan detail lainnya sudah benar. Selalu periksa sebelum melanjutkan pembayaran.</p>
+      </div>
+      <div className="dashboard-payment-guide-tabs" role="tablist">
+        {guide.methods.map((item, index) => (
+          <button key={item.method} type="button" role="tab" aria-selected={index === tab} className={index === tab ? 'is-active' : ''} onClick={() => setTab(index)}>{guideMethodLabels[item.method] || item.method}</button>
+        ))}
+      </div>
+      {active.steps.map((step) => (
+        <div className="dashboard-payment-guide-step" key={step.title}>
+          <strong>{step.title}</strong>
+          <ol>{step.content.map((line) => <li key={line}>{line}</li>)}</ol>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function formatFullPrice(amount, currency) {
+  const value = typeof amount === 'number' ? amount : Number(amount)
+  if (!Number.isFinite(value)) return '-'
+  const formatted = new Intl.NumberFormat('id-ID', { maximumFractionDigits: 2 }).format(value)
+  return currency === 'IDR' ? `Rp ${formatted},-` : `${currency} ${formatted}`
+}
+
+const QRIS_LOGO_URL = 'https://upload.wikimedia.org/wikipedia/commons/a/a2/Logo_QRIS.svg'
+const VA_FEE = 4440
+
+function transactionFee(paymentMethod, subtotal) {
+  const amount = Number(subtotal)
+  if (!paymentMethod || !Number.isFinite(amount) || amount <= 0) return 0
+  if (paymentMethod.startsWith('va:')) return VA_FEE
+  if (paymentMethod.startsWith('qris:')) {
+    const mdr = amount > 100000 ? amount * 0.007 : 0
+    return Math.round(mdr + amount * 0.0029)
+  }
+  return 0
+}
+
+function groupCartItems(items) {
+  const groups = new Map()
+  for (const item of items) {
+    const key = `${item.product_id}|${item.period}`
+    const group = groups.get(key)
+    const lineTotal = Number(item.total ?? item.price) || 0
+    if (group) {
+      group.count += 1
+      group.total += lineTotal
+      group.lastId = item.id
+    } else {
+      groups.set(key, { ...item, key, count: 1, total: lineTotal, lastId: item.id })
+    }
+  }
+  return [...groups.values()]
+}
+
+const periodLabels = { '1M': 'Bulanan', '1Y': 'Tahunan' }
+
 function formatServicePeriod(period) {
   const unit = typeof period === 'string' ? period.match(/[YMW]$/i)?.[0].toUpperCase() : null
   const units = { Y: 'tahun', M: 'bulan', W: 'pekan' }
@@ -118,6 +208,32 @@ function ClientDashboardPage() {
   const [serviceError, setServiceError] = useState('')
   const [serviceLoadAttempt, setServiceLoadAttempt] = useState(0)
   const [servicePage, setServicePage] = useState(1)
+  const [orderProducts, setOrderProducts] = useState([])
+  const [orderCategories, setOrderCategories] = useState([])
+  const [selectedOrderCategory, setSelectedOrderCategory] = useState(null)
+  const [selectedProductId, setSelectedProductId] = useState(null)
+  const [selectedPeriod, setSelectedPeriod] = useState(null)
+  const [cart, setCart] = useState({ items: [], total: 0, currency: 'IDR' })
+  const [cartOpen, setCartOpen] = useState(false)
+  const [cartError, setCartError] = useState('')
+  const [paymentMethods, setPaymentMethods] = useState({ status: 'idle', items: [], error: '' })
+  const [paymentMethod, setPaymentMethod] = useState('')
+  const [checkoutError, setCheckoutError] = useState('')
+  const [isPaying, setIsPaying] = useState(false)
+  const [paymentResult, setPaymentResult] = useState(null)
+  const [paymentStatus, setPaymentStatus] = useState({ state: 'idle', data: null, error: '' })
+  const [statusCooldown, setStatusCooldown] = useState(false)
+  const [cancelOpen, setCancelOpen] = useState(false)
+  const [cancelReason, setCancelReason] = useState('')
+  const [cancelOther, setCancelOther] = useState('')
+  const [cancelError, setCancelError] = useState('')
+  const [isCancelling, setIsCancelling] = useState(false)
+  const [isCartBusy, setIsCartBusy] = useState(false)
+  const [orderSlide, setOrderSlide] = useState('next')
+  const [orderCurrency, setOrderCurrency] = useState('IDR')
+  const [orderState, setOrderState] = useState('idle')
+  const [orderError, setOrderError] = useState('')
+  const [orderLoadAttempt, setOrderLoadAttempt] = useState(0)
   const [ticketModalOpen, setTicketModalOpen] = useState(false)
   const [helpdesks, setHelpdesks] = useState([])
   const [helpdeskState, setHelpdeskState] = useState('idle')
@@ -336,7 +452,107 @@ function ClientDashboardPage() {
     return () => controller.abort()
   }, [activePage, authState, serviceLoadAttempt])
 
+  useEffect(() => {
+    if (authState !== 'authenticated' || activePage !== 'orders' && activePage !== 'checkout') return undefined
+
+    const controller = new AbortController()
+    setOrderState('loading')
+    setOrderError('')
+
+    fetch('/api/pricing.php?scope=dashboard', { signal: controller.signal })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result || !Array.isArray(result.plans) || typeof result.currency !== 'string') {
+          throw new Error(result?.error || 'Daftar produk tidak dapat dimuat.')
+        }
+        setOrderProducts(result.plans)
+        setOrderCategories(Array.isArray(result.categories) ? result.categories : [])
+        setOrderCurrency(result.currency)
+        setOrderState('loaded')
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setOrderError(error.message || 'Daftar produk tidak dapat dimuat.')
+          setOrderState('error')
+        }
+      })
+
+    return () => controller.abort()
+  }, [activePage, authState, orderLoadAttempt])
+
+  useEffect(() => {
+    if (authState !== 'authenticated') return undefined
+
+    const controller = new AbortController()
+    fetch('/api/fossbilling-auth.php?action=cart', { credentials: 'same-origin', signal: controller.signal })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !Array.isArray(result?.cart?.items)) {
+          throw new Error(result?.error || 'Keranjang tidak dapat dimuat.')
+        }
+        setCart(result.cart)
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') setCartError(error.message || 'Keranjang tidak dapat dimuat.')
+      })
+
+    return () => controller.abort()
+  }, [authState])
+
+  useEffect(() => {
+    if (activePage !== 'checkout' || authState !== 'authenticated') return undefined
+    const controller = new AbortController()
+    setPaymentMethods({ status: 'loading', items: [], error: '' })
+    fetch('/api/fossbilling-auth.php?action=payment-methods', { credentials: 'same-origin', signal: controller.signal })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !Array.isArray(result?.methods)) {
+          throw new Error(result?.error || 'Metode pembayaran tidak dapat dimuat.')
+        }
+        setPaymentMethods({ status: 'ready', items: result.methods, error: '' })
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') setPaymentMethods({ status: 'error', items: [], error: error.message || 'Metode pembayaran tidak dapat dimuat.' })
+      })
+
+    return () => controller.abort()
+  }, [activePage, authState])
+
+  const updateCart = async (action, body) => {
+    setIsCartBusy(true)
+    setCartError('')
+    try {
+      const response = await fetch(`/api/fossbilling-auth.php?action=${action}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify(body),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || !Array.isArray(result?.cart?.items)) {
+        throw new Error(result?.error || 'Keranjang tidak dapat diperbarui.')
+      }
+      setCart(result.cart)
+      return true
+    } catch (error) {
+      setCartError(error.message || 'Keranjang tidak dapat diperbarui.')
+      return false
+    } finally {
+      setIsCartBusy(false)
+    }
+  }
+
+  const handleAddToCart = async (product) => {
+    if (await updateCart('cart-add', { product_id: String(product.id), period: selectedPeriod })) {
+      setSelectedProductId(null)
+      setSelectedPeriod(null)
+      setNotice('')
+      openPage('checkout')
+    }
+  }
+
   const openPage = (page) => {
+    setCartOpen(false)
     if (page === 'support') {
       setActiveTicketId(null)
       setTicket(null)
@@ -626,7 +842,346 @@ function ClientDashboardPage() {
     }
   }
 
+  const orderCategory = orderCategories.some((item) => item.id === selectedOrderCategory) ? selectedOrderCategory : orderCategories[0]?.id ?? null
+  const selectOrderCategory = (id) => {
+    const from = orderCategories.findIndex((item) => item.id === orderCategory)
+    const to = orderCategories.findIndex((item) => item.id === id)
+    setOrderSlide(to < from ? 'prev' : 'next')
+    setSelectedProductId(null)
+    setSelectedPeriod(null)
+    setSelectedOrderCategory(id)
+  }
+
+  const loadPaymentStatus = async (paymentId) => {
+    setPaymentStatus((current) => ({ ...current, state: 'loading', error: '' }))
+    setStatusCooldown(true)
+    window.setTimeout(() => setStatusCooldown(false), 3000)
+    try {
+      const response = await fetch(`/api/fossbilling-auth.php?action=payment-status&payment_id=${encodeURIComponent(paymentId)}`, { credentials: 'same-origin' })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || !result?.payment) throw new Error(result?.error || 'Status pembayaran tidak dapat dimuat.')
+      setPaymentStatus({ state: 'ready', data: result.payment, error: '' })
+    } catch (error) {
+      setPaymentStatus({ state: 'error', data: null, error: error.message || 'Status pembayaran tidak dapat dimuat.' })
+    }
+  }
+
+  const handleCancelPayment = async () => {
+    const reason = cancelReason === 'Alasan lainnya' ? cancelOther.trim() : cancelReason
+    if (!reason) {
+      setCancelError(cancelReason === 'Alasan lainnya' ? 'Tuliskan alasan pembatalan.' : 'Pilih alasan pembatalan.')
+      return
+    }
+    setIsCancelling(true)
+    setCancelError('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=payment-cancel', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ payment_id: paymentResult.payment.payment_id, reason }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok) throw new Error(result?.error || 'Pesanan tidak dapat dibatalkan.')
+      setCancelOpen(false)
+      setCancelReason('')
+      setCancelOther('')
+      setNotice(result?.invoice_cancelled === false ? 'Pembayaran dibatalkan, tetapi invoice belum dapat dibatalkan otomatis. Hubungi admin.' : 'Pesanan dan invoice berhasil dibatalkan.')
+      loadPaymentStatus(paymentResult.payment.payment_id)
+    } catch (error) {
+      setCancelError(error.message || 'Pesanan tidak dapat dibatalkan.')
+    } finally {
+      setIsCancelling(false)
+    }
+  }
+
+  const handleCheckout = async () => {
+    setCheckoutError('')
+    if (cart.items.length === 0) {
+      setCheckoutError('Keranjang masih kosong.')
+      return
+    }
+    if (!paymentMethod) {
+      setCheckoutError('Pilih metode pembayaran terlebih dahulu.')
+      return
+    }
+    if (!paymentMethod.startsWith('va:') || paymentMethod === 'va:') {
+      setCheckoutError('Metode ini belum tersedia. Pilih salah satu bank Virtual Account.')
+      return
+    }
+
+    setIsPaying(true)
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=checkout', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ method: paymentMethod }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || typeof result?.payment?.payment_id !== 'string') {
+        throw new Error(result?.error || 'Checkout gagal diproses.')
+      }
+      setPaymentResult(result)
+      setPaymentStatus({ state: 'idle', data: null, error: '' })
+      setCart((current) => ({ ...current, items: [], total: 0 }))
+      setPaymentMethod('')
+      openPage('payment')
+      loadPaymentStatus(result.payment.payment_id)
+    } catch (error) {
+      setCheckoutError(error.message || 'Checkout gagal diproses.')
+    } finally {
+      setIsPaying(false)
+    }
+  }
+
   const renderMenuPage = () => {
+    if (activePage === 'payment') {
+      const created = paymentResult?.payment
+      const status = paymentStatus.data
+      const rows = status ? [
+        ['Payment ID', status.payment_id], ['Order ID', status.order_id], ['Bank', status.bank_code],
+        ['Nomor VA', status.va_number], ['Nominal', formatFullPrice(status.amount, status.currency || 'IDR')],
+        ['Diterima merchant', status.merchant_receives != null ? formatFullPrice(status.merchant_receives, status.currency || 'IDR') : null],
+        ['Tipe', status.payment_type], ['Status', status.status], ['Kedaluwarsa', status.expired_at],
+        ['Dibuat', status.created_at], ['Dibayar', status.paid_at], ['Pengirim', status.sender_name],
+      ].filter(([, value]) => value !== null && value !== undefined && value !== '') : []
+      return (
+        <section className="dashboard-page-panel">
+          <div className="dashboard-page-heading">
+            <div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Status pembayaran</h2><p>Data respons dari Komerce untuk pembayaran Virtual Account.</p></div>
+          </div>
+          {!created ? (
+            <div className="dashboard-empty-state"><span><CreditCard size={22} /></span><strong>Belum ada pembayaran</strong><p>Mulai dari keranjang untuk membuat pembayaran.</p><button className="dashboard-outline-action" type="button" onClick={() => openPage('orders')}>Lihat produk</button></div>
+          ) : (
+            <div className="dashboard-payment-result">
+              <div className="dashboard-payment-va">
+                <div>
+                  <small>Nomor Virtual Account {created.bank_name || created.bank_code}</small>
+                  <strong>{created.va_number} <CopyVaButton value={created.va_number} /></strong>
+                  <small>Nama Virtual Account</small>
+                  <b>{VA_ACCOUNT_NAME}</b>
+                  <small>Nominal yang harus dibayar</small>
+                  <b>{formatFullPrice(created.amount, 'IDR')}</b>
+                </div>
+                {getPaymentGuide(created.bank_code)?.logo && <img src={getPaymentGuide(created.bank_code).logo} alt={created.bank_name || created.bank_code} referrerPolicy="no-referrer" />}
+              </div>
+              {paymentStatus.state === 'loading' && <p className="dashboard-powered-by">Memuat status pembayaran...</p>}
+              {paymentStatus.state === 'error' && <p className="dashboard-checkout-error" role="alert">{paymentStatus.error}</p>}
+              {rows.length > 0 && <dl className="dashboard-payment-data">{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{String(value)}</dd></div>)}</dl>}
+              <div className="dashboard-payment-actions">
+              <button className="dashboard-outline-action" type="button" disabled={statusCooldown || paymentStatus.state === 'loading'} onClick={() => loadPaymentStatus(created.payment_id)}>Perbarui status</button>
+              <button className="dashboard-danger-action" type="button" disabled={paymentStatus.data?.status !== 'PENDING'} onClick={() => { setCancelError(''); setCancelOpen(true) }}>Batalkan pesanan</button>
+              </div>
+              <PaymentGuide bankCode={created.bank_code} />
+            </div>
+          )}
+          {cancelOpen && (
+            <div className="dashboard-modal-backdrop" role="presentation">
+              <div className="dashboard-modal" role="dialog" aria-modal="true" aria-labelledby="cancel-title">
+                <h3 id="cancel-title">Batalkan pesanan?</h3>
+                <p>Virtual Account akan dinonaktifkan dan tidak dapat dipakai lagi.</p>
+                <label>Alasan pembatalan
+                  <select value={cancelReason} onChange={(event) => { setCancelReason(event.target.value); setCancelError('') }}>
+                    <option value="">Pilih alasan</option>
+                    <option>Salah memilih produk</option>
+                    <option>Ingin mengganti metode pembayaran</option>
+                    <option>Harga tidak sesuai</option>
+                    <option>Tidak jadi membeli</option>
+                    <option>Alasan lainnya</option>
+                  </select>
+                </label>
+                {cancelReason === 'Alasan lainnya' && (
+                  <label>Tulis alasan
+                    <textarea rows={3} maxLength={200} value={cancelOther} onChange={(event) => { setCancelOther(event.target.value); setCancelError('') }} />
+                  </label>
+                )}
+                {cancelError && <p className="dashboard-checkout-error" role="alert">{cancelError}</p>}
+                <div className="dashboard-modal-actions">
+                  <button className="dashboard-outline-action" type="button" disabled={isCancelling} onClick={() => setCancelOpen(false)}>Kembali</button>
+                  <button className="dashboard-danger-action" type="button" disabled={isCancelling} onClick={handleCancelPayment}>{isCancelling ? 'Membatalkan...' : 'Ya, batalkan'}</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </section>
+      )
+    }
+
+    if (activePage === 'checkout') {
+      const customerLabel = [client.first_name, client.last_name].filter(Boolean).join(' ') || client.name || customerName
+      return (
+        <section className="dashboard-page-panel">
+          <div className="dashboard-page-heading">
+            <div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Checkout</h2><p>Tinjau pesananmu, lalu pilih metode pembayaran.</p></div>
+            <button className="dashboard-product-back" type="button" onClick={() => openPage('orders')}><ArrowLeft size={14} /> Tambah produk</button>
+          </div>
+          {cart.items.length === 0 ? (
+            <div className="dashboard-empty-state"><span><ShoppingCart size={22} /></span><strong>Keranjang masih kosong</strong><p>Pilih produk di menu Order untuk memulai.</p><button className="dashboard-outline-action" type="button" onClick={() => openPage('orders')}>Lihat produk</button></div>
+          ) : (
+            <div className="dashboard-checkout-layout">
+              <div className="dashboard-checkout-main">
+                <h3 className="dashboard-checkout-title">Ringkasan pesanan</h3>
+                <ul className="dashboard-checkout-items">
+                  {groupCartItems(cart.items).map((item) => {
+                    const categoryId = orderProducts.find((product) => String(product.id) === item.product_id)?.category_id
+                    const categoryName = orderCategories.find((category) => category.id === categoryId)?.name
+                    const itemName = categoryName ? `${item.title} - ${categoryName}` : item.title
+                    return (
+                      <li key={item.key}>
+                        <span><strong>{itemName}{item.count > 1 && <em className="dashboard-count" aria-label={`${item.count} item`}>X {item.count}</em>}</strong><small>Langganan {(periodLabels[item.period] || item.period || '-').toLowerCase()}</small></span>
+                        <strong>{formatFullPrice(item.total, cart.currency)}</strong>
+                        <button type="button" aria-label={`Hapus satu ${item.title}`} disabled={isCartBusy} onClick={() => updateCart('cart-remove', { id: item.lastId })}><X size={14} /></button>
+                      </li>
+                    )
+                  })}
+                </ul>
+                {cartError && <p className="dashboard-checkout-error" role="alert">{cartError}</p>}
+
+                <h3 className="dashboard-checkout-title">Metode pembayaran</h3>
+                {paymentMethods.status === 'loading' && <p className="dashboard-powered-by">Memuat metode pembayaran...</p>}
+                {paymentMethods.status === 'error' && <p className="dashboard-checkout-error" role="alert">{paymentMethods.error}</p>}
+                {(() => {
+                  const methodId = (method) => `${method.payment_type}:${method.bank_code || ''}`
+                  const vaMethods = paymentMethods.items.filter((method) => method.payment_type === 'va')
+                  const qrisMethod = paymentMethods.items.find((method) => method.payment_type === 'qris')
+                  const otherMethods = paymentMethods.items.filter((method) => method.payment_type !== 'va' && method.payment_type !== 'qris')
+                  return (
+                    <>
+                      {(vaMethods.length > 0 || qrisMethod) && (
+                        <>
+                          <p className="dashboard-payment-group">Virtual Account</p>
+                          <div className="dashboard-bank-grid" role="radiogroup" aria-label="Virtual Account">
+                            {vaMethods.map((method) => (
+                              <button type="button" role="radio" aria-checked={paymentMethod === methodId(method)} aria-label={`Virtual Account ${method.display_name}`} title={method.display_name} className={`dashboard-bank-option${paymentMethod === methodId(method) ? ' is-active' : ''}`} key={methodId(method)} onClick={() => { setPaymentMethod(methodId(method)); setCheckoutError('') }}>
+                                {typeof method.logo_url === 'string' && method.logo_url.startsWith('https://')
+                                  ? <img src={method.logo_url} alt="" loading="lazy" />
+                                  : <span>{method.bank_code}</span>}
+                              </button>
+                            ))}
+                            {qrisMethod && (
+                              <button type="button" role="radio" aria-checked={paymentMethod === methodId(qrisMethod)} aria-label="QRIS" title="QRIS" className={`dashboard-bank-option${paymentMethod === methodId(qrisMethod) ? ' is-active' : ''}`} onClick={() => { setPaymentMethod(methodId(qrisMethod)); setCheckoutError('') }}>
+                                <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                              </button>
+                            )}
+                          </div>
+                          <p className="dashboard-fee-note">* Biaya transaksi virtual account Rp 4.440,-</p>
+                          <p className="dashboard-fee-note">* Biaya transaksi menggunakan QRIS 0,7% + 0,29%.</p>
+                        </>
+                      )}
+                      {otherMethods.length > 0 && (
+                        <div className="dashboard-payment-options" role="radiogroup" aria-label="Metode lainnya">
+                          {otherMethods.map((method) => (
+                            <button type="button" role="radio" aria-checked={paymentMethod === methodId(method)} className={`dashboard-payment-option${paymentMethod === methodId(method) ? ' is-active' : ''}`} key={methodId(method)} onClick={() => { setPaymentMethod(methodId(method)); setCheckoutError('') }}>
+                              <span className="dashboard-payment-radio" />
+                              <span><strong>{method.display_name}</strong><small>Minimal Rp {Number(method.min_amount || 0).toLocaleString('id-ID')}</small></span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )
+                })()}
+              </div>
+
+              <aside className="dashboard-checkout-summary">
+                <h3 className="dashboard-checkout-title">Total pembayaran</h3>
+                <dl>
+                  <div><dt>Pelanggan</dt><dd>{customerLabel}</dd></div>
+                  <div><dt>Jumlah item</dt><dd>{cart.items.length}</dd></div>
+                  <div><dt>Subtotal</dt><dd>{formatFullPrice(cart.total, cart.currency)}</dd></div>
+                  {paymentMethod && <div><dt>Biaya transaksi</dt><dd>{formatFullPrice(transactionFee(paymentMethod, cart.total), cart.currency)}</dd></div>}
+                </dl>
+                <div className="dashboard-checkout-total"><span>Total</span><strong>{formatFullPrice(Number(cart.total) + transactionFee(paymentMethod, cart.total), cart.currency)}</strong></div>
+                <button className="dashboard-primary-action dashboard-checkout-button" type="button" disabled={cart.items.length === 0 || isCartBusy || isPaying} onClick={handleCheckout}>
+                  <CreditCard size={16} /> Checkout
+                </button>
+                {checkoutError && <p className="dashboard-checkout-error" role="alert">{checkoutError}</p>}
+              </aside>
+            </div>
+          )}
+          {isPaying && <div className="dashboard-pay-overlay" role="status"><span className="dashboard-pay-spinner" /><strong>Membuat pembayaran...</strong><small>Mohon tunggu, jangan tutup halaman ini.</small></div>}
+        </section>
+      )
+    }
+
+    if (activePage === 'orders') {
+      return (
+        <section className="dashboard-page-panel">
+          <div className="dashboard-page-heading">
+            <div><span className="dashboard-section-kicker">PRODUK SANGATTA CLOUD</span><h2>Order</h2><p>Pilih produk yang sesuai dengan kebutuhanmu.</p></div>
+          </div>
+          {orderState === 'loading' ? (
+            <div className="dashboard-profile-loading" role="status">Memuat daftar produk...</div>
+          ) : orderState === 'error' ? (
+            <div className="dashboard-profile-load-error" role="alert">
+              <p>{orderError}</p>
+              <button type="button" className="dashboard-profile-retry" onClick={() => setOrderLoadAttempt((attempt) => attempt + 1)}>Coba lagi</button>
+            </div>
+          ) : orderProducts.length > 0 ? (
+            <>
+            {orderCategories.length > 1 && (
+              <div className="dashboard-filter-tabs" role="tablist" aria-label="Kategori produk">
+                {orderCategories.map((item) => <button type="button" role="tab" aria-selected={orderCategory === item.id} className={orderCategory === item.id ? 'dashboard-filter-active' : ''} key={item.id} onClick={() => selectOrderCategory(item.id)}>{item.name}</button>)}
+              </div>
+            )}
+            <div className={`dashboard-product-grid pager-${orderSlide}`} key={orderCategory}>
+              {orderProducts.filter((product) => (orderCategory === null || product.category_id === orderCategory) && (selectedProductId === null || product.id === selectedProductId)).map((product) => {
+                const isSelected = selectedProductId === product.id
+                const periods = [
+                  { id: '1M', label: 'Bulanan', price: product.monthly_price, unit: 'bulan' },
+                  { id: '1Y', label: 'Tahunan', price: product.annual_price, unit: 'tahun' },
+                ]
+                const head = (
+                  <div className="dashboard-product-head">
+                    <h3>{product.name}</h3>
+                    {product.storage && <strong className="dashboard-product-storage">{product.storage}</strong>}
+                  </div>
+                )
+
+                if (!isSelected) {
+                  return (
+                    <article className="dashboard-product-card is-selectable" key={product.id} role="button" tabIndex={0} onClick={() => { setSelectedProductId(product.id); setSelectedPeriod(null) }} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedProductId(product.id); setSelectedPeriod(null) } }}>
+                      {head}
+                      {product.description && <p>{product.description}</p>}
+                      <div className="dashboard-product-prices">
+                        {periods.map((period) => <span key={period.id}><small>{period.label}</small><strong>{orderCurrency} {formatCompactPrice(period.price)}<small> / {period.unit}</small></strong></span>)}
+                      </div>
+                    </article>
+                  )
+                }
+
+                return (
+                  <article className="dashboard-product-card is-expanded" key={product.id}>
+                    <button className="dashboard-product-back" type="button" onClick={() => { setSelectedProductId(null); setSelectedPeriod(null) }}><ArrowLeft size={14} /> Pilih produk lain</button>
+                    {head}
+                    {product.description && <p>{product.description}</p>}
+                    <div className="dashboard-period-options" role="radiogroup" aria-label="Periode berlangganan">
+                      {periods.map((period) => (
+                        <button type="button" role="radio" aria-checked={selectedPeriod === period.id} className={`dashboard-period-option${selectedPeriod === period.id ? ' is-active' : ''}`} key={period.id} onClick={() => setSelectedPeriod(period.id)}>
+                          <small>{period.label}</small>
+                          <strong>{formatFullPrice(period.price, orderCurrency)}</strong>
+                          <span>/ {period.unit}</span>
+                        </button>
+                      ))}
+                    </div>
+                    {selectedPeriod && (
+                      <button className="dashboard-primary-action dashboard-product-next" type="button" disabled={isCartBusy} onClick={() => handleAddToCart(product)}>
+                        {isCartBusy ? 'Menambahkan...' : 'Next'} <ArrowRight size={16} />
+                      </button>
+                    )}
+                  </article>
+                )
+              })}
+            </div>
+            </>
+          ) : (
+            <div className="dashboard-empty-state"><span><PackagePlus size={22} /></span><strong>Belum ada produk</strong><p>Produk yang tersedia akan ditampilkan di sini.</p></div>
+          )}
+        </section>
+      )
+    }
+
     if (activePage === 'profile') {
       return (
         <section className="dashboard-page-panel dashboard-profile-page">
@@ -1031,10 +1586,43 @@ function ClientDashboardPage() {
             <input aria-label="Cari" placeholder="Cari layanan, tagihan..." />
             <kbd>⌘ K</kbd>
           </div>
+          <div className="dashboard-notification-wrap" onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) setCartOpen(false)
+          }} onKeyDown={(event) => {
+            if (event.key === 'Escape') setCartOpen(false)
+          }}>
+            <button className="dashboard-icon-button" type="button" aria-label="Keranjang" aria-haspopup="true" aria-expanded={cartOpen} onClick={() => { setBellOpen(false); setCartOpen((open) => !open) }}>
+              <ShoppingCart size={18} />{cart.items.length > 0 && <span className="dashboard-cart-count">{cart.items.length}</span>}
+            </button>
+            {cartOpen && (
+              <div className="dashboard-notification-panel dashboard-cart-panel">
+                <div className="dashboard-notification-head"><strong>Keranjang</strong></div>
+                {cartError && <p role="alert">{cartError}</p>}
+                {cart.items.length === 0 ? <p>Keranjang masih kosong.</p> : (
+                  <>
+                    <ul>
+                      {groupCartItems(cart.items).map((item) => {
+                        const categoryId = orderProducts.find((product) => String(product.id) === item.product_id)?.category_id
+                        const categoryName = orderCategories.find((category) => category.id === categoryId)?.name
+                        return (
+                        <li className="dashboard-cart-item" key={item.key}>
+                          <span><strong>{categoryName ? `${item.title} - ${categoryName}` : item.title}{item.count > 1 && <em className="dashboard-count" aria-label={`${item.count} item`}>X {item.count}</em>}</strong><small>{periodLabels[item.period] || item.period || '-'} · {formatFullPrice(item.price, cart.currency)}</small></span>
+                          <button type="button" aria-label={`Hapus satu ${item.title}`} disabled={isCartBusy} onClick={() => updateCart('cart-remove', { id: item.lastId })}><X size={14} /></button>
+                        </li>
+                        )
+                      })}
+                    </ul>
+                    <div className="dashboard-cart-total"><span>Total</span><strong>{formatFullPrice(cart.total, cart.currency)}</strong></div>
+                    <button className="dashboard-primary-action dashboard-cart-checkout" type="button" onClick={() => openPage('checkout')}>Checkout <ArrowRight size={15} /></button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
           <NotificationBell
             notifications={notifications}
             open={bellOpen}
-            onOpenChange={setBellOpen}
+            onOpenChange={(open) => { if (open) setCartOpen(false); setBellOpen(open) }}
             onSelect={(item) => { markTicketRead(item.ticketId); openPage('support'); setActiveTicketId(String(item.ticketId)) }}
           />
           <div className="dashboard-account-menu-wrap" onBlur={(event) => {

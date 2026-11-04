@@ -17,20 +17,16 @@ function failPricing(string $logMessage): never
     respond(['error' => 'Pricing service is unavailable.'], 502);
 }
 
-function fetchProducts(string $baseUrl, int $page): array
+function fetchJson(string $url, ?string $adminToken = null): array
 {
-    $url = $baseUrl . '/api/guest/product/get_list?' . http_build_query([
-        'page' => $page,
-        'per_page' => 100,
-    ]);
     $body = '';
     $curl = curl_init($url);
 
     if ($curl === false) {
-        failPricing('Unable to initialize cURL.');
+        throw new RuntimeException('Unable to initialize cURL.');
     }
 
-    curl_setopt_array($curl, [
+    $options = [
         CURLOPT_CONNECTTIMEOUT => 3,
         CURLOPT_TIMEOUT => 8,
         CURLOPT_FOLLOWLOCATION => false,
@@ -43,7 +39,12 @@ function fetchProducts(string $baseUrl, int $page): array
             $body .= $chunk;
             return strlen($chunk);
         },
-    ]);
+    ];
+    if ($adminToken !== null) {
+        $options[CURLOPT_HTTPAUTH] = CURLAUTH_BASIC;
+        $options[CURLOPT_USERPWD] = 'admin:' . $adminToken;
+    }
+    curl_setopt_array($curl, $options);
 
     $result = curl_exec($curl);
     $status = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
@@ -51,35 +52,55 @@ function fetchProducts(string $baseUrl, int $page): array
     curl_close($curl);
 
     if ($result === false) {
-        failPricing('FossBilling request failed: ' . $curlError);
+        throw new RuntimeException('FossBilling request failed: ' . $curlError);
     }
 
     if ($status !== 200) {
-        failPricing('FossBilling returned HTTP ' . $status . '.');
+        throw new RuntimeException('FossBilling returned HTTP ' . $status . '.');
     }
 
     try {
         $decoded = json_decode($body, true, 512, JSON_THROW_ON_ERROR);
     } catch (JsonException $exception) {
-        failPricing('FossBilling returned invalid JSON.');
+        throw new RuntimeException('FossBilling returned invalid JSON.');
     }
 
-    if (!is_array($decoded) || ($decoded['error'] ?? null) !== null) {
-        failPricing('FossBilling returned an unexpected product-list response.');
+    if (!is_array($decoded) || ($decoded['error'] ?? null) !== null || !is_array($decoded['result'] ?? null)) {
+        throw new RuntimeException('FossBilling returned an unexpected response.');
     }
 
-    $result = $decoded['result'] ?? null;
-    if (
-        !is_array($result)
-        || !isset($result['list'])
-        || !is_array($result['list'])
-        || !isset($result['pages'])
-        || !is_numeric($result['pages'])
-    ) {
+    return $decoded['result'];
+}
+
+function fetchProducts(string $baseUrl, int $page, ?string $adminToken): array
+{
+    $area = $adminToken === null ? 'guest' : 'admin';
+    try {
+        $result = fetchJson($baseUrl . '/api/' . $area . '/product/get_list?' . http_build_query([
+            'page' => $page,
+            'per_page' => 100,
+        ]), $adminToken);
+    } catch (RuntimeException $exception) {
+        failPricing($exception->getMessage());
+    }
+
+    if (!isset($result['list']) || !is_array($result['list']) || !isset($result['pages']) || !is_numeric($result['pages'])) {
         failPricing('FossBilling returned an unexpected product-list response.');
     }
 
     return $result;
+}
+
+function fetchCategoryNames(string $baseUrl): array
+{
+    $names = [];
+    foreach (fetchJson($baseUrl . '/api/guest/product/category_get_pairs') as $id => $title) {
+        if (is_string($title) && $title !== '') {
+            $names[(string) $id] = $title;
+        }
+    }
+
+    return $names;
 }
 
 function validPrice(mixed $value): int|float|null
@@ -128,13 +149,26 @@ if (!preg_match('/^[A-Z]{3}$/', $currency)) {
     failPricing('PRICING_CURRENCY must be a three-letter uppercase currency code.');
 }
 
+$adminToken = null;
+if (($_GET['scope'] ?? '') === 'dashboard') {
+    session_start(['read_and_close' => true, 'use_strict_mode' => 1]);
+    if (empty($_SESSION['fossbilling_authenticated'])) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+
+    $token = trim((string) getenv('FOSSBILLING_ADMIN_TOKEN'));
+    if ($token !== '') {
+        $adminToken = $token;
+    }
+}
+
 $productPresentation = [];
 $products = [];
 $page = 1;
 $pages = null;
 
 do {
-    $result = fetchProducts($baseUrl, $page);
+    $result = fetchProducts($baseUrl, $page, $adminToken);
     $reportedPages = (int) $result['pages'];
 
     if ($reportedPages < 1 || $reportedPages > 20 || ($pages !== null && $pages !== $reportedPages)) {
@@ -151,11 +185,23 @@ do {
     $page++;
 } while ($page <= $pages);
 
+$categoryNames = [];
+try {
+    $categoryNames = fetchCategoryNames($baseUrl);
+} catch (Throwable $exception) {
+    error_log('Pricing API: unable to load product categories: ' . $exception->getMessage());
+}
+
 $plans = [];
 foreach ($products as $product) {
+    if (($product['status'] ?? null) === 'disabled') {
+        continue;
+    }
+
     $id = $product['id'] ?? null;
     $slug = $product['slug'] ?? null;
     $name = $product['title'] ?? null;
+    $categoryId = $product['product_category_id'] ?? null;
     $productPricing = $product['pricing'] ?? null;
     $pricing = is_array($productPricing) ? ($productPricing['recurrent'] ?? null) : null;
 
@@ -191,6 +237,7 @@ foreach ($products as $product) {
     $plan = [
         'id' => (string) $id,
         'name' => $name,
+        'category_id' => is_int($categoryId) || is_string($categoryId) ? (string) $categoryId : null,
         'monthly_price' => $monthlyPrice,
         'annual_price' => $annualPrice,
         'description' => is_string($product['description'] ?? null) ? $product['description'] : '',
@@ -198,7 +245,10 @@ foreach ($products as $product) {
         'featured' => $details['featured'] ?? false,
     ];
 
-    if (is_string($details['storage'] ?? null) && $details['storage'] !== '') {
+    $configuredStorage = is_array($product['config'] ?? null) ? ($product['config']['storage'] ?? null) : null;
+    if (is_string($configuredStorage) && trim($configuredStorage) !== '') {
+        $plan['storage'] = substr(trim($configuredStorage), 0, 50);
+    } elseif (is_string($details['storage'] ?? null) && $details['storage'] !== '') {
         $plan['storage'] = $details['storage'];
     }
     if (is_int($details['users'] ?? null) && $details['users'] > 0) {
@@ -211,6 +261,14 @@ foreach ($products as $product) {
     $plans[] = $plan;
 }
 
+$usedCategories = [];
+foreach ($plans as $plan) {
+    $categoryId = $plan['category_id'];
+    if ($categoryId !== null && !isset($usedCategories[$categoryId])) {
+        $usedCategories[$categoryId] = ['id' => $categoryId, 'name' => $categoryNames[$categoryId] ?? 'Kategori ' . $categoryId];
+    }
+}
+
 if ($plans === []) {
     failPricing('FossBilling returned no products with enabled monthly and yearly pricing.');
 }
@@ -218,5 +276,6 @@ if ($plans === []) {
 respond([
     'source' => 'fossbilling',
     'currency' => $currency,
+    'categories' => array_values($usedCategories),
     'plans' => $plans,
 ]);

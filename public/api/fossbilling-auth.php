@@ -297,7 +297,7 @@ function callFossBilling(string $baseUrl, string $action, array $payload): array
     return ['response' => $decoded, 'cookies' => $cookies];
 }
 
-function callFossBillingClient(string $endpoint, array $payload): array
+function callFossBillingClient(string $endpoint, array $payload, string $area = 'client'): array
 {
     if (!function_exists('curl_init')) {
         throw new RuntimeException('The PHP cURL extension is unavailable.');
@@ -330,7 +330,7 @@ function callFossBillingClient(string $endpoint, array $payload): array
     }
 
     $body = '';
-    $curl = curl_init(authBaseUrl() . '/api/client/' . $endpoint);
+    $curl = curl_init(authBaseUrl() . '/api/' . $area . '/' . $endpoint);
     if ($curl === false) {
         throw new RuntimeException('Unable to initialize FossBilling request.');
     }
@@ -389,6 +389,98 @@ function callFossBillingClient(string $endpoint, array $payload): array
     }
 
     return $decoded;
+}
+
+function cancelFossBillingInvoice(int $invoiceId, string $reason): bool
+{
+    $token = trim((string) getenv('FOSSBILLING_ADMIN_TOKEN'));
+    if ($token === '') {
+        return false;
+    }
+    $baseUrl = rtrim(trim(getenv('FOSSBILLING_BASE_URL') ?: 'http://localhost:8086'), '/');
+    $curl = curl_init($baseUrl . '/api/admin/invoice/cancel');
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_POST => true,
+        CURLOPT_USERPWD => 'admin:' . $token,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Accept: application/json'],
+        CURLOPT_POSTFIELDS => json_encode(['id' => $invoiceId, 'reason' => 'Dibatalkan pelanggan: ' . $reason]),
+    ]);
+    $body = curl_exec($curl);
+    curl_close($curl);
+    $json = is_string($body) ? json_decode($body, true) : null;
+
+    return is_array($json) && ($json['result'] ?? null) === true && empty($json['error']);
+}
+
+function komerceRequest(string $method, string $path, ?array $payload = null): array
+{
+    $apiKey = trim((string) getenv('KOMERCE_API_KEY'));
+    if ($apiKey === '') {
+        respond(['error' => 'KOMERCE_API_KEY belum diatur di server.'], 503);
+    }
+    $baseUrl = rtrim(trim(getenv('KOMERCE_BASE_URL') ?: 'https://api-sandbox.collaborator.komerce.id/user'), '/');
+    if (preg_match('#^https://#', $baseUrl) !== 1) {
+        respond(['error' => 'KOMERCE_BASE_URL harus HTTPS.'], 500);
+    }
+
+    $headers = ['x-api-key: ' . $apiKey, 'Accept: application/json'];
+    $options = [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 20, CURLOPT_CUSTOMREQUEST => $method];
+    if ($payload !== null) {
+        $headers[] = 'Content-Type: application/json';
+        $options[CURLOPT_POSTFIELDS] = json_encode($payload, JSON_UNESCAPED_SLASHES);
+    }
+    $options[CURLOPT_HTTPHEADER] = $headers;
+
+    $curl = curl_init($baseUrl . $path);
+    curl_setopt_array($curl, $options);
+    $body = curl_exec($curl);
+    $status = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+    curl_close($curl);
+
+    $json = is_string($body) ? json_decode($body, true) : null;
+    if (!is_array($json)) {
+        respond(['error' => 'Komerce tidak merespons dengan benar.'], 502);
+    }
+    if ($status < 200 || $status >= 300) {
+        $message = is_string($json['meta']['message'] ?? null) ? $json['meta']['message'] : 'Permintaan ke Komerce ditolak.';
+        respond(['error' => $message], $status === 429 ? 429 : 502);
+    }
+
+    return $json;
+}
+
+function cartResponse(array $response): array
+{
+    $cart = $response['result'] ?? null;
+    if (!is_array($cart) || !is_array($cart['items'] ?? null)) {
+        throw new RuntimeException('FossBilling returned an invalid cart.');
+    }
+
+    $items = [];
+    foreach ($cart['items'] as $item) {
+        if (!is_array($item) || !is_scalar($item['id'] ?? null) || !is_string($item['title'] ?? null)) {
+            continue;
+        }
+        $items[] = [
+            'id' => (string) $item['id'],
+            'product_id' => is_scalar($item['product_id'] ?? null) ? (string) $item['product_id'] : null,
+            'title' => $item['title'],
+            'period' => is_string($item['period'] ?? null) ? $item['period'] : null,
+            'quantity' => is_numeric($item['quantity'] ?? null) ? (int) $item['quantity'] : 1,
+            'price' => is_numeric($item['price'] ?? null) ? $item['price'] + 0 : null,
+            'total' => is_numeric($item['total'] ?? null) ? $item['total'] + 0 : null,
+        ];
+    }
+
+    $currency = $cart['currency']['code'] ?? null;
+
+    return [
+        'items' => $items,
+        'total' => is_numeric($cart['total'] ?? null) ? $cart['total'] + 0 : 0,
+        'currency' => is_string($currency) && preg_match('/^[A-Z]{3}$/', $currency) === 1 ? $currency : 'IDR',
+    ];
 }
 
 function fetchHelpdesks(): array
@@ -674,6 +766,46 @@ if ($action === 'services' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
+if ($action === 'payment-methods' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (empty($_SESSION['fossbilling_authenticated'])) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+    session_write_close();
+
+    $json = komerceRequest('GET', '/api/v1/user/methods');
+    respond(['methods' => $json['data'] ?? $json]);
+}
+
+if ($action === 'payment-status' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (empty($_SESSION['fossbilling_authenticated'])) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+    $paymentId = $_GET['payment_id'] ?? null;
+    if (!is_string($paymentId) || preg_match('#^[A-Za-z0-9._/-]{1,100}$#', $paymentId) !== 1
+        || empty($_SESSION['komerce_payments'][$paymentId])) {
+        respond(['error' => 'Pembayaran tidak ditemukan.'], 404);
+    }
+    session_write_close();
+
+    $json = komerceRequest('GET', '/api/v1/user/payment/status/' . rawurlencode($paymentId));
+    respond(['payment' => $json['data'] ?? null]);
+}
+
+if ($action === 'cart' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (empty($_SESSION['fossbilling_authenticated'])) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+
+    try {
+        respond(['cart' => cartResponse(callFossBillingClient('cart/get', [], 'guest'))]);
+    } catch (DomainException $error) {
+        respond(['error' => $error->getMessage()], $error->getCode() ?: 422);
+    } catch (Throwable $error) {
+        error_log('FossBilling cart error: ' . $error->getMessage());
+        respond(['error' => 'Keranjang tidak dapat dimuat. Coba lagi nanti.'], 502);
+    }
+}
+
 if ($action === 'helpdesks' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     if (empty($_SESSION['fossbilling_authenticated'])) {
         respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
@@ -808,7 +940,7 @@ if ($action === 'ticket' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
-if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state'], true)
+if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state', 'cart-add', 'cart-remove', 'checkout', 'payment-cancel'], true)
     || $_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(['error' => 'Permintaan tidak valid.'], 405);
 }
@@ -817,7 +949,7 @@ if (!csrfIsValid()) {
     respond(['error' => 'Sesi kedaluwarsa. Muat ulang halaman lalu coba lagi.'], 403);
 }
 
-if (in_array($action, ['logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state'], true)
+if (in_array($action, ['logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state', 'cart-add', 'cart-remove', 'checkout', 'payment-cancel'], true)
     && empty($_SESSION['fossbilling_authenticated'])) {
     respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
 }
@@ -919,6 +1051,180 @@ try {
             throw new RuntimeException('FossBilling returned an unexpected ticket response.');
         }
         respond(['result' => (int) $ticketId, 'error' => null]);
+    }
+
+    if ($action === 'cart-add') {
+        $rawBody = file_get_contents('php://input');
+        $input = json_decode($rawBody === false ? '' : substr($rawBody, 0, 1024), true, 16, JSON_THROW_ON_ERROR);
+        $productId = is_array($input) ? ($input['product_id'] ?? null) : null;
+        $period = is_array($input) ? ($input['period'] ?? null) : null;
+        if (!is_array($input) || array_diff(array_keys($input), ['product_id', 'period']) !== []
+            || !is_string($productId) || preg_match('/^[0-9]{1,18}$/', $productId) !== 1
+            || !is_string($period) || !in_array($period, ['1M', '1Y'], true)) {
+            respond(['error' => 'Produk atau periode tidak valid.'], 422);
+        }
+
+        callFossBillingClient('cart/add_item', ['id' => (int) $productId, 'period' => $period, 'quantity' => 1, 'multiple' => true], 'guest');
+        respond(['cart' => cartResponse(callFossBillingClient('cart/get', [], 'guest'))]);
+    }
+
+    if ($action === 'cart-remove') {
+        $rawBody = file_get_contents('php://input');
+        $input = json_decode($rawBody === false ? '' : substr($rawBody, 0, 1024), true, 16, JSON_THROW_ON_ERROR);
+        $itemId = is_array($input) ? ($input['id'] ?? null) : null;
+        if (!is_array($input) || array_diff(array_keys($input), ['id']) !== []
+            || !is_string($itemId) || preg_match('/^[0-9]{1,18}$/', $itemId) !== 1) {
+            respond(['error' => 'Item keranjang tidak valid.'], 422);
+        }
+
+        callFossBillingClient('cart/remove_item', ['id' => (int) $itemId], 'guest');
+        respond(['cart' => cartResponse(callFossBillingClient('cart/get', [], 'guest'))]);
+    }
+
+    if ($action === 'payment-cancel') {
+        $rawBody = file_get_contents('php://input');
+        $input = json_decode($rawBody === false ? '' : substr($rawBody, 0, 2048), true, 16, JSON_THROW_ON_ERROR);
+        $paymentId = is_array($input) ? ($input['payment_id'] ?? null) : null;
+        $reason = is_array($input) ? ($input['reason'] ?? null) : null;
+        if (!is_array($input) || array_diff(array_keys($input), ['payment_id', 'reason']) !== []
+            || !is_string($paymentId) || preg_match('#^[A-Za-z0-9._/-]{1,100}$#', $paymentId) !== 1
+            || empty($_SESSION['komerce_payments'][$paymentId])) {
+            respond(['error' => 'Pembayaran tidak ditemukan.'], 404);
+        }
+        if (!is_string($reason) || trim($reason) === '' || mb_strlen($reason) > 200) {
+            respond(['error' => 'Alasan pembatalan wajib diisi (maksimal 200 karakter).'], 422);
+        }
+        $stored = $_SESSION['komerce_payments'][$paymentId];
+        $invoiceId = is_array($stored) ? ($stored['invoice_id'] ?? null) : null;
+        $orderId = is_array($stored) ? ($stored['order_id'] ?? null) : null;
+        session_write_close();
+
+        $current = komerceRequest('GET', '/api/v1/user/payment/status/' . rawurlencode($paymentId))['data'] ?? null;
+        $currentStatus = is_array($current) ? strtoupper((string) ($current['status'] ?? '')) : '';
+        if ($currentStatus !== 'PENDING') {
+            respond(['error' => 'Hanya pembayaran berstatus PENDING yang dapat dibatalkan.', 'status' => $currentStatus], 409);
+        }
+
+        $cancelled = komerceRequest('POST', '/api/v1/user/payment/cancel', ['payment_id' => $paymentId, 'reason' => trim($reason)]);
+        $invoiceCancelled = is_int($invoiceId) && cancelFossBillingInvoice($invoiceId, trim($reason));
+        if (is_int($orderId)) {
+            try {
+                callFossBillingClient('order/delete', ['id' => $orderId]);
+            } catch (Throwable) {
+                // Pesanan yang sudah berjalan tidak bisa dihapus; invoice tetap dibatalkan.
+            }
+        }
+
+        respond(['result' => $cancelled['data'] ?? true, 'invoice_cancelled' => $invoiceCancelled, 'error' => null]);
+    }
+
+    if ($action === 'checkout') {
+        $rawBody = file_get_contents('php://input');
+        $input = json_decode($rawBody === false ? '' : substr($rawBody, 0, 1024), true, 16, JSON_THROW_ON_ERROR);
+        $method = is_array($input) ? ($input['method'] ?? null) : null;
+        if (!is_array($input) || array_diff(array_keys($input), ['method']) !== []
+            || !is_string($method) || preg_match('/^(va|qris):[A-Z_]{0,32}$/', $method) !== 1) {
+            respond(['error' => 'Pilih metode pembayaran terlebih dahulu.'], 422);
+        }
+        [$methodType, $bankCode] = explode(':', $method, 2);
+        if ($methodType !== 'va' || $bankCode === '') {
+            respond(['error' => 'Pembayaran QRIS belum tersedia.'], 422);
+        }
+
+        $available = komerceRequest('GET', '/api/v1/user/methods')['data'] ?? [];
+        $validBank = false;
+        foreach (is_array($available) ? $available : [] as $item) {
+            if (is_array($item) && ($item['payment_type'] ?? null) === 'va' && ($item['bank_code'] ?? null) === $bankCode) {
+                $validBank = true;
+            }
+        }
+        if (!$validBank) {
+            respond(['error' => 'Bank yang dipilih tidak tersedia.'], 422);
+        }
+
+        $cart = cartResponse(callFossBillingClient('cart/get', [], 'guest'));
+        if ($cart['items'] === []) {
+            respond(['error' => 'Keranjang kosong.'], 422);
+        }
+
+        $profile = callFossBillingClient('profile/get', [])['result'] ?? [];
+        $phone = preg_replace('/[^0-9]/', '', (string) ($profile['phone'] ?? ''));
+        $phoneCc = preg_replace('/[^0-9]/', '', (string) ($profile['phone_cc'] ?? ''));
+        if ($phone !== '' && $phone[0] !== '0') {
+            $phone = ($phoneCc === '62' || $phoneCc === '') ? '0' . $phone : '+' . $phoneCc . $phone;
+        }
+        if ($phone === '') {
+            respond(['error' => 'Lengkapi nomor telepon di menu Profil sebelum checkout.'], 422);
+        }
+
+        $gateways = callFossBillingClient('invoice/gateways', [], 'guest')['result'] ?? [];
+        $gatewayId = null;
+        foreach (is_array($gateways) ? $gateways : [] as $gateway) {
+            if (is_array($gateway) && ($gateway['code'] ?? null) === 'Komerce' && is_scalar($gateway['id'] ?? null)) {
+                $gatewayId = (int) $gateway['id'];
+            }
+        }
+        if ($gatewayId === null) {
+            respond(['error' => 'Gateway pembayaran Komerce belum aktif.'], 503);
+        }
+
+        $order = callFossBillingClient('cart/checkout', ['gateway_id' => $gatewayId])['result'] ?? null;
+        $hash = is_array($order) ? ($order['invoice_hash'] ?? null) : null;
+        if (!is_string($hash) || preg_match('/^[a-z0-9]{1,64}$/i', $hash) !== 1) {
+            throw new RuntimeException('FossBilling returned an unexpected checkout response.');
+        }
+
+        $invoice = callFossBillingClient('invoice/get', ['hash' => $hash])['result'] ?? null;
+        if (!is_array($invoice) || !is_numeric($invoice['total'] ?? null) || !is_scalar($invoice['id'] ?? null)) {
+            throw new RuntimeException('FossBilling returned an unexpected invoice.');
+        }
+
+        $vaFee = 4440;
+        $amount = (int) round((float) $invoice['total']) + $vaFee;
+        if ($amount < 10000) {
+            respond(['error' => 'Nominal pembayaran minimal Rp 10.000.'], 422);
+        }
+
+        $items = [];
+        foreach ($cart['items'] as $item) {
+            $items[] = ['name' => mb_substr((string) $item['title'], 0, 100), 'quantity' => max(1, (int) $item['quantity']), 'price' => (int) round((float) $item['price'])];
+        }
+        $items[] = ['name' => 'Biaya transaksi virtual account', 'quantity' => 1, 'price' => $vaFee];
+
+        $buyer = is_array($invoice['buyer'] ?? null) ? $invoice['buyer'] : [];
+        $name = trim((string) ($buyer['first_name'] ?? '') . ' ' . (string) ($buyer['last_name'] ?? ''));
+        $payload = [
+            'order_id' => mb_substr(is_string($invoice['serie_nr'] ?? null) && $invoice['serie_nr'] !== '' ? $invoice['serie_nr'] : 'INV' . $invoice['id'], 0, 100),
+            'payment_type' => 'bank_transfer',
+            'channel_code' => $bankCode,
+            'amount' => $amount,
+            'customer' => [
+                'name' => $name !== '' ? $name : 'Pelanggan',
+                'email' => (string) ($buyer['email'] ?? ($_SESSION['fossbilling_client']['email'] ?? '')),
+                'phone' => $phone,
+            ],
+            'items' => $items,
+            'expiry_duration' => 86400,
+        ];
+
+        $publicUrl = rtrim(trim((string) getenv('FOSSBILLING_PUBLIC_URL')), '/');
+        if ($publicUrl !== '' && preg_match('#^https://#', $publicUrl) === 1) {
+            $payload['callback_url'] = $publicUrl . '/ipn.php?' . http_build_query(['gateway_id' => $gatewayId, 'invoice_id' => (int) $invoice['id']]);
+            $payload['callback_api_key'] = hash_hmac('sha256', 'komerce-callback', trim((string) getenv('KOMERCE_API_KEY')));
+        }
+
+        $created = komerceRequest('POST', '/api/v1/user/payment/create', $payload);
+        $payment = $created['data'] ?? null;
+        $paymentId = is_array($payment) ? ($payment['payment_id'] ?? null) : null;
+        if (!is_string($paymentId) || preg_match('#^[A-Za-z0-9._/-]{1,100}$#', $paymentId) !== 1) {
+            throw new RuntimeException('Komerce returned an unexpected payment response.');
+        }
+        $_SESSION['komerce_payments'][$paymentId] = [
+            'invoice_id' => (int) $invoice['id'],
+            'order_id' => is_scalar($order['order_id'] ?? null) ? (int) $order['order_id'] : null,
+        ];
+
+        respond(['payment' => $payment, 'invoice' => ['id' => (int) $invoice['id'], 'hash' => $hash, 'total' => (int) round((float) $invoice['total'])], 'error' => null]);
     }
 
     if ($action === 'storage-url') {

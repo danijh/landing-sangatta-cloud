@@ -225,6 +225,9 @@ function LandingPage() {
   const [language, setLanguage] = useState('id')
   const [billing, setBilling] = useState('monthly')
   const [plans, setPlans] = useState([])
+  const [categories, setCategories] = useState([])
+  const [selectedCategory, setSelectedCategory] = useState(null)
+  const [slideDirection, setSlideDirection] = useState('next')
   const [currency, setCurrency] = useState('IDR')
   const [priceState, setPriceState] = useState('loading')
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
@@ -235,6 +238,13 @@ function LandingPage() {
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const notifications = useNotifications({ enabled: Boolean(sessionClient), csrfToken })
   const t = content[language]
+  const category = categories.some((item) => item.id === selectedCategory) ? selectedCategory : categories[0]?.id ?? null
+  const selectCategory = (id) => {
+    const from = categories.findIndex((item) => item.id === category)
+    const to = categories.findIndex((item) => item.id === id)
+    setSlideDirection(to < from ? 'prev' : 'next')
+    setSelectedCategory(id)
+  }
 
   useEffect(() => {
     const controller = new AbortController()
@@ -272,6 +282,7 @@ function LandingPage() {
       }
 
       setPlans(result.plans)
+      setCategories(Array.isArray(result.categories) ? result.categories : [])
       setCurrency(result.currency)
       setPriceState(result.source === 'placeholder' ? 'placeholder' : 'ready')
     } catch (error) {
@@ -567,6 +578,23 @@ function LandingPage() {
               </button>
             </div>
 
+            {categories.length > 1 && (
+              <div className="billing-toggle category-toggle mt-4" role="tablist" aria-label="Category">
+                {categories.map((item) => (
+                  <button
+                    className={category === item.id ? 'billing-option active' : 'billing-option'}
+                    type="button"
+                    role="tab"
+                    aria-selected={category === item.id}
+                    key={item.id}
+                    onClick={() => selectCategory(item.id)}
+                  >
+                    {item.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {priceState === 'loading' && (
               <p className="pricing-feedback" role="status">{t.loading}</p>
             )}
@@ -584,8 +612,8 @@ function LandingPage() {
                     {t.placeholderNotice}
                   </div>
                 )}
-                <div className="mt-8 grid gap-5 md:grid-cols-3">
-                  {plans.map((plan, index) => {
+                <div className={`plan-grid pager-${slideDirection}`} key={category}>
+                  {plans.filter((plan) => category === null || plan.category_id === category).map((plan, index) => {
                     const isYearly = billing === 'yearly'
                     const localizedPlan = plan.translations?.[language] ?? plan
                     const planFeatures = localizedPlan.features ?? plan.features ?? []
