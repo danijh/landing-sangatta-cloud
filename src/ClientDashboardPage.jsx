@@ -31,6 +31,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { NotificationBell, useNotifications } from './notifications.jsx'
+import QRCode from 'qrcode'
 import { getPaymentGuide, guideMethodLabels } from './paymentGuides'
 
 const countryCodes = 'AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'.split(' ')
@@ -81,6 +82,16 @@ function formatCompactPrice(price) {
   return new Intl.NumberFormat('id-ID', { maximumFractionDigits: 2 }).format(amount)
 }
 
+// Tombol sementara untuk uji: buka halaman simulasi pembayaran Komerce.
+function komercePaymentUrl(value) {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.hostname.endsWith('.komerce.my.id') ? url.href : ''
+  } catch {
+    return ''
+  }
+}
+
 const VA_ACCOUNT_NAME = 'PT Sangatta Cloud Media'
 
 function CopyVaButton({ value }) {
@@ -98,6 +109,29 @@ function CopyVaButton({ value }) {
     <button className="dashboard-copy-button" type="button" onClick={copy} aria-label="Salin nomor VA" title={copied ? 'Tersalin' : 'Salin nomor VA'}>
       {copied ? <Check size={16} /> : <Copy size={16} />}
     </button>
+  )
+}
+
+function QrisPanel({ payment }) {
+  const [image, setImage] = useState('')
+  useEffect(() => {
+    let active = true
+    QRCode.toDataURL(payment.qris_string, { width: 320, margin: 1, errorCorrectionLevel: 'M' })
+      .then((url) => { if (active) setImage(url) })
+      .catch(() => { if (active) setImage('') })
+    return () => { active = false }
+  }, [payment.qris_string])
+  return (
+    <div className="dashboard-payment-va dashboard-payment-qris">
+      <div>
+        <small>Pembayaran QRIS {payment.payment_type === 'gopay' ? 'GoPay' : 'Komerce'}</small>
+        <small>Nominal yang harus dibayar</small>
+        <b>{formatFullPrice(payment.amount, 'IDR')}</b>
+        <small>Pindai dengan aplikasi bank atau e-wallet apa pun. Bayar sesuai nominal persis{payment.payment_type === 'gopay' ? ', termasuk kode unik di belakang' : ', termasuk angka unik di belakang'}.</small>
+        {payment.expired_at && <small>Berlaku hingga {payment.expired_at}</small>}
+      </div>
+      {image ? <img className="dashboard-qris-code" src={image} alt="Kode QRIS" /> : <span>Membuat kode QR...</span>}
+    </div>
   )
 }
 
@@ -134,6 +168,29 @@ function formatFullPrice(amount, currency) {
   return currency === 'IDR' ? `Rp ${formatted},-` : `${currency} ${formatted}`
 }
 
+function formatInvoiceDate(value) {
+  if (!value) return '-'
+  const date = new Date(String(value).replace(' ', 'T'))
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }).format(date)
+}
+
+function invoiceStatusDisplay(status) {
+  switch (String(status || '').toLowerCase()) {
+    case 'paid':
+    case 'lunas':
+      return { label: 'Lunas', tone: 'status-paid' }
+    case 'refunded':
+      return { label: 'Dikembalikan', tone: 'status-closed' }
+    case 'canceled':
+    case 'cancelled':
+    case 'dibatalkan':
+      return { label: 'Dibatalkan', tone: 'status-closed' }
+    default:
+      return { label: 'Menunggu', tone: 'status-pending' }
+  }
+}
+
 const QRIS_LOGO_URL = 'https://upload.wikimedia.org/wikipedia/commons/a/a2/Logo_QRIS.svg'
 const VA_FEE = 4440
 
@@ -141,6 +198,7 @@ function transactionFee(paymentMethod, subtotal) {
   const amount = Number(subtotal)
   if (!paymentMethod || !Number.isFinite(amount) || amount <= 0) return 0
   if (paymentMethod.startsWith('va:')) return VA_FEE
+  if (paymentMethod === 'gopay:') return 0
   if (paymentMethod.startsWith('qris:')) {
     const mdr = amount > 100000 ? amount * 0.007 : 0
     return Math.round(mdr + amount * 0.0029)
@@ -171,6 +229,12 @@ function formatServicePeriod(period) {
   const unit = typeof period === 'string' ? period.match(/[YMW]$/i)?.[0].toUpperCase() : null
   const units = { Y: 'tahun', M: 'bulan', W: 'pekan' }
   return unit && units[unit] ? `/${units[unit]}` : ''
+}
+
+function servicePeriodLabel(period) {
+  const unit = typeof period === 'string' ? period.match(/[YMW]$/i)?.[0].toUpperCase() : null
+  const units = { Y: 'tahun', M: 'bulan', W: 'pekan' }
+  return unit && units[unit] ? units[unit] : ''
 }
 
 function formatRelativeTime(value) {
@@ -208,6 +272,26 @@ function ClientDashboardPage() {
   const [serviceError, setServiceError] = useState('')
   const [serviceLoadAttempt, setServiceLoadAttempt] = useState(0)
   const [servicePage, setServicePage] = useState(1)
+  const [invoiceRecords, setInvoiceRecords] = useState([])
+  const [invoiceState, setInvoiceState] = useState('idle')
+  const [invoiceError, setInvoiceError] = useState('')
+  const [invoiceLoadAttempt, setInvoiceLoadAttempt] = useState(0)
+  const [invoicePage, setInvoicePage] = useState(1)
+  const [wallet, setWallet] = useState({ status: 'idle', balance: null, currency: 'IDR', transactions: [], error: '' })
+  const [walletLoadAttempt, setWalletLoadAttempt] = useState(0)
+  const [topupOpen, setTopupOpen] = useState(false)
+  const [topupAmount, setTopupAmount] = useState('')
+  const [topupMethod, setTopupMethod] = useState('')
+  const [topupError, setTopupError] = useState('')
+  const [isTopupBusy, setIsTopupBusy] = useState(false)
+  const [balancePayPassword, setBalancePayPassword] = useState('')
+  const [balancePayError, setBalancePayError] = useState('')
+  const [balancePayOpen, setBalancePayOpen] = useState(false)
+  const [isBalancePayBusy, setIsBalancePayBusy] = useState(false)
+  const [checkoutBalanceOpen, setCheckoutBalanceOpen] = useState(false)
+  const [checkoutBalancePassword, setCheckoutBalancePassword] = useState('')
+  const [checkoutBalanceError, setCheckoutBalanceError] = useState('')
+  const [isCheckoutBalanceBusy, setIsCheckoutBalanceBusy] = useState(false)
   const [orderProducts, setOrderProducts] = useState([])
   const [orderCategories, setOrderCategories] = useState([])
   const [selectedOrderCategory, setSelectedOrderCategory] = useState(null)
@@ -223,6 +307,11 @@ function ClientDashboardPage() {
   const [paymentResult, setPaymentResult] = useState(null)
   const [paymentStatus, setPaymentStatus] = useState({ state: 'idle', data: null, error: '' })
   const [statusCooldown, setStatusCooldown] = useState(false)
+  const [invoicePayModal, setInvoicePayModal] = useState(null)
+  const [invoicePayMethod, setInvoicePayMethod] = useState('')
+  const [invoicePayError, setInvoicePayError] = useState('')
+  const [isPayingInvoice, setIsPayingInvoice] = useState(false)
+  const [periodConflict, setPeriodConflict] = useState(null)
   const [cancelOpen, setCancelOpen] = useState(false)
   const [cancelReason, setCancelReason] = useState('')
   const [cancelOther, setCancelOther] = useState('')
@@ -234,6 +323,10 @@ function ClientDashboardPage() {
   const [orderState, setOrderState] = useState('idle')
   const [orderError, setOrderError] = useState('')
   const [orderLoadAttempt, setOrderLoadAttempt] = useState(0)
+  const [invoiceDetail, setInvoiceDetail] = useState(null)
+  const [invoiceDetailState, setInvoiceDetailState] = useState('idle')
+  const [invoiceDetailError, setInvoiceDetailError] = useState('')
+  const [isPdfDownloading, setIsPdfDownloading] = useState(false)
   const [ticketModalOpen, setTicketModalOpen] = useState(false)
   const [helpdesks, setHelpdesks] = useState([])
   const [helpdeskState, setHelpdeskState] = useState('idle')
@@ -423,7 +516,7 @@ function ClientDashboardPage() {
   }, [ticketModalOpen])
 
   useEffect(() => {
-    if (authState !== 'authenticated' || activePage !== 'services') return undefined
+    if (authState !== 'authenticated' || !['services', 'orders', 'checkout'].includes(activePage)) return undefined
 
     const controller = new AbortController()
     setServiceState('loading')
@@ -451,6 +544,67 @@ function ClientDashboardPage() {
 
     return () => controller.abort()
   }, [activePage, authState, serviceLoadAttempt])
+
+  useEffect(() => {
+    if (authState !== 'authenticated' || (activePage !== 'invoices' && activePage !== 'dashboard')) return undefined
+
+    const controller = new AbortController()
+    setInvoiceState('loading')
+    setInvoiceError('')
+
+    fetch('/api/fossbilling-auth.php?action=invoices', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result || !Array.isArray(result.invoices)) {
+          throw new Error(result?.error || 'Daftar tagihan tidak dapat dimuat.')
+        }
+        setInvoiceRecords(result.invoices)
+        setInvoiceState('loaded')
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setInvoiceError(error.message || 'Daftar tagihan tidak dapat dimuat.')
+          setInvoiceState('error')
+        }
+      })
+
+    return () => controller.abort()
+  }, [activePage, authState, invoiceLoadAttempt])
+
+  useEffect(() => {
+    if (authState !== 'authenticated') return undefined
+
+    const controller = new AbortController()
+    setWallet((current) => ({ ...current, status: 'loading', error: '' }))
+
+    fetch('/api/fossbilling-auth.php?action=wallet', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result || typeof result.balance !== 'number' || !Array.isArray(result.transactions)) {
+          throw new Error(result?.error || 'Dompet tidak dapat dimuat.')
+        }
+        setWallet({
+          status: 'loaded',
+          balance: result.balance,
+          currency: typeof result.currency === 'string' ? result.currency : 'IDR',
+          transactions: result.transactions,
+          error: '',
+        })
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setWallet((current) => ({ ...current, status: 'error', error: error.message || 'Dompet tidak dapat dimuat.' }))
+        }
+      })
+
+    return () => controller.abort()
+  }, [authState, walletLoadAttempt])
 
   useEffect(() => {
     if (authState !== 'authenticated' || activePage !== 'orders' && activePage !== 'checkout') return undefined
@@ -500,7 +654,26 @@ function ClientDashboardPage() {
   }, [authState])
 
   useEffect(() => {
-    if (activePage !== 'checkout' || authState !== 'authenticated') return undefined
+    if (authState !== 'authenticated' || activePage !== 'checkout') return undefined
+
+    const controller = new AbortController()
+    fetch('/api/fossbilling-auth.php?action=cart', { credentials: 'same-origin', signal: controller.signal })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !Array.isArray(result?.cart?.items)) {
+          throw new Error(result?.error || 'Keranjang tidak dapat dimuat.')
+        }
+        setCart(result.cart)
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') setCartError(error.message || 'Keranjang tidak dapat dimuat.')
+      })
+
+    return () => controller.abort()
+  }, [authState, activePage])
+
+  useEffect(() => {
+    if ((activePage !== 'checkout' && !invoicePayModal && !topupOpen) || authState !== 'authenticated') return undefined
     const controller = new AbortController()
     setPaymentMethods({ status: 'loading', items: [], error: '' })
     fetch('/api/fossbilling-auth.php?action=payment-methods', { credentials: 'same-origin', signal: controller.signal })
@@ -516,7 +689,7 @@ function ClientDashboardPage() {
       })
 
     return () => controller.abort()
-  }, [activePage, authState])
+  }, [activePage, authState, invoicePayModal, topupOpen])
 
   const updateCart = async (action, body) => {
     setIsCartBusy(true)
@@ -529,25 +702,49 @@ function ClientDashboardPage() {
         body: JSON.stringify(body),
       })
       const result = await response.json().catch(() => null)
+      if (response.status === 409 && result?.conflict) {
+        return { ok: false, conflict: result.conflict }
+      }
       if (!response.ok || !Array.isArray(result?.cart?.items)) {
         throw new Error(result?.error || 'Keranjang tidak dapat diperbarui.')
       }
       setCart(result.cart)
-      return true
+      return { ok: true }
     } catch (error) {
       setCartError(error.message || 'Keranjang tidak dapat diperbarui.')
-      return false
+      return { ok: false }
     } finally {
       setIsCartBusy(false)
     }
   }
 
+  const finishAddToCart = () => {
+    setSelectedProductId(null)
+    setSelectedPeriod(null)
+    setNotice('')
+    openPage('checkout')
+  }
+
   const handleAddToCart = async (product) => {
-    if (await updateCart('cart-add', { product_id: String(product.id), period: selectedPeriod })) {
-      setSelectedProductId(null)
-      setSelectedPeriod(null)
-      setNotice('')
-      openPage('checkout')
+    const result = await updateCart('cart-add', { product_id: String(product.id), period: selectedPeriod })
+    if (result.ok) {
+      finishAddToCart()
+      return
+    }
+    if (result.conflict) {
+      setPeriodConflict({ ...result.conflict, product })
+    }
+  }
+
+  const handleReplacePeriod = async () => {
+    if (!periodConflict) return
+    const { product, new_period: newPeriod } = periodConflict
+    setIsCartBusy(true)
+    const result = await updateCart('cart-add', { product_id: String(product.id), period: newPeriod, replace: true })
+    setIsCartBusy(false)
+    if (result.ok) {
+      setPeriodConflict(null)
+      finishAddToCart()
     }
   }
 
@@ -576,6 +773,7 @@ function ClientDashboardPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTicketUnread, activeTicketId])
   const supportUnread = unreadTicketIds.size
+  const unpaidInvoiceCount = invoiceRecords.filter((invoice) => invoice.status === 'unpaid').length
 
   const customerName = profile?.name
     || [profile?.first_name, profile?.last_name].filter(Boolean).join(' ')
@@ -589,6 +787,21 @@ function ClientDashboardPage() {
     .map((part) => part[0])
     .join('')
     .toUpperCase()
+
+  // Peta produk yang masih aktif per product_id — dipakai untuk memberi tahu
+  // bahwa pembelian ulang akan memperpanjang masa aktif, bukan produk baru.
+  const activeProductExpiry = (() => {
+    const map = {}
+    const now = Date.now()
+    for (const order of serviceOrders) {
+      if (order.status !== 'active' || !order.product_id || !order.expires_at) continue
+      const expiry = new Date(String(order.expires_at).replace(' ', 'T')).getTime()
+      if (!Number.isFinite(expiry) || expiry <= now) continue
+      const key = String(order.product_id)
+      if (map[key] === undefined || expiry > map[key]) map[key] = expiry
+    }
+    return map
+  })()
 
   const handleLogout = async () => {
     setIsLoggingOut(true)
@@ -895,6 +1108,33 @@ function ClientDashboardPage() {
     }
   }
 
+  const paymentId = paymentResult?.payment?.payment_id || null
+  const paymentType = paymentResult?.payment?.payment_type || ''
+  const PAYMENT_TERMINAL = new Set(['PAID', 'EXPIRED', 'CANCELED', 'CANCELLED', 'FAILED'])
+  const paymentPending = Boolean(paymentId) && activePage === 'payment'
+    && (!paymentStatus.data || !PAYMENT_TERMINAL.has(String(paymentStatus.data.status || '').toUpperCase()))
+  const paymentPollMs = ['qris', 'gopay'].includes(paymentType) ? 5000 : 15000
+  useEffect(() => {
+    if (!paymentPending || !paymentId) return undefined
+    const timer = window.setInterval(() => loadPaymentStatus(paymentId), paymentPollMs)
+    return () => window.clearInterval(timer)
+  }, [paymentPending, paymentId, paymentPollMs])
+
+  const paidNoticeRef = useRef('')
+  useEffect(() => {
+    const pid = paymentResult?.payment?.payment_id
+    if (!pid) { paidNoticeRef.current = ''; return }
+    if (paymentStatus.data?.status !== 'PAID' || paidNoticeRef.current === pid) return
+    paidNoticeRef.current = pid
+    const amount = paymentStatus.data?.merchant_receives ?? paymentResult?.invoice?.total ?? paymentStatus.data?.amount
+    setNotice(paymentResult?.wallet_topup === true
+      ? `Pembayaran berhasil. Saldo ditambahkan sebesar ${formatFullPrice(amount, 'IDR')}.`
+      : `Pembayaran berhasil. Tagihan ${paymentStatus.data?.order_id || paymentResult?.invoice?.id || ''} telah lunas — layanan dan tagihan diperbarui.`)
+    setWalletLoadAttempt((attempt) => attempt + 1)
+    setInvoiceLoadAttempt((attempt) => attempt + 1)
+    setServiceLoadAttempt((attempt) => attempt + 1)
+  }, [paymentStatus.data, paymentResult])
+
   const handleCheckout = async () => {
     setCheckoutError('')
     if (cart.items.length === 0) {
@@ -905,8 +1145,8 @@ function ClientDashboardPage() {
       setCheckoutError('Pilih metode pembayaran terlebih dahulu.')
       return
     }
-    if (!paymentMethod.startsWith('va:') || paymentMethod === 'va:') {
-      setCheckoutError('Metode ini belum tersedia. Pilih salah satu bank Virtual Account.')
+    if (paymentMethod === 'va:' || (!paymentMethod.startsWith('va:') && !paymentMethod.startsWith('qris:') && paymentMethod !== 'gopay:')) {
+      setCheckoutError('Metode ini belum tersedia. Pilih bank Virtual Account atau QRIS.')
       return
     }
 
@@ -919,6 +1159,16 @@ function ClientDashboardPage() {
         body: JSON.stringify({ method: paymentMethod }),
       })
       const result = await response.json().catch(() => null)
+      if (result?.paid_with_credits === true) {
+        setCart((current) => ({ ...current, items: [], total: 0 }))
+        setPaymentMethod('')
+        setNotice(`Pesanan berhasil dibayar dengan saldo${result?.invoice?.total ? ` sebesar ${formatFullPrice(result.invoice.total, cart.currency)}` : ''}.`)
+        setWalletLoadAttempt((attempt) => attempt + 1)
+        setInvoiceLoadAttempt((attempt) => attempt + 1)
+        setServiceLoadAttempt((attempt) => attempt + 1)
+        openPage('services')
+        return
+      }
       if (!response.ok || typeof result?.payment?.payment_id !== 'string') {
         throw new Error(result?.error || 'Checkout gagal diproses.')
       }
@@ -932,6 +1182,144 @@ function ClientDashboardPage() {
       setCheckoutError(error.message || 'Checkout gagal diproses.')
     } finally {
       setIsPaying(false)
+    }
+  }
+
+  const handleCheckoutBalance = async () => {
+    if (!checkoutBalancePassword) {
+      setCheckoutBalanceError('Masukkan password akun untuk konfirmasi.')
+      return
+    }
+    setIsCheckoutBalanceBusy(true)
+    setCheckoutBalanceError('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=checkout-balance', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ password: checkoutBalancePassword }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || result?.result !== true) {
+        throw new Error(result?.error || 'Checkout dengan saldo gagal diproses.')
+      }
+      setCheckoutBalanceOpen(false)
+      setCheckoutBalancePassword('')
+      setCart((current) => ({ ...current, items: [], total: 0 }))
+      setNotice(`Pesanan berhasil dibayar dengan saldo${result?.invoice?.total ? ` sebesar ${formatFullPrice(result.invoice.total, cart.currency)}` : ''}.`)
+      setWalletLoadAttempt((attempt) => attempt + 1)
+      setInvoiceLoadAttempt((attempt) => attempt + 1)
+      setServiceLoadAttempt((attempt) => attempt + 1)
+      openPage('services')
+    } catch (error) {
+      setCheckoutBalanceError(error.message || 'Checkout dengan saldo gagal diproses.')
+    } finally {
+      setIsCheckoutBalanceBusy(false)
+    }
+  }
+
+  const handleTopup = async () => {
+    const amount = Number(String(topupAmount).replace(/[^0-9]/g, ''))
+    if (!Number.isInteger(amount) || amount < 10000 || amount > 100000000) {
+      setTopupError('Nominal penambahan saldo harus antara Rp 10.000 dan Rp 100.000.000.')
+      return
+    }
+    if (!topupMethod) {
+      setTopupError('Pilih metode pembayaran terlebih dahulu.')
+      return
+    }
+    setIsTopupBusy(true)
+    setTopupError('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=wallet-topup', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ amount, method: topupMethod }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || typeof result?.payment?.payment_id !== 'string') {
+        throw new Error(result?.error || 'Pembayaran gagal diproses.')
+      }
+      setPaymentResult(result)
+      setPaymentStatus({ state: 'idle', data: null, error: '' })
+      setTopupOpen(false)
+      setTopupAmount('')
+      setTopupMethod('')
+      openPage('payment')
+      loadPaymentStatus(result.payment.payment_id)
+    } catch (error) {
+      setTopupError(error.message || 'Pembayaran gagal diproses.')
+    } finally {
+      setIsTopupBusy(false)
+    }
+  }
+
+  const handlePayWithBalance = async () => {
+    if (!invoicePayModal || !balancePayOpen) return
+    if (!balancePayPassword) {
+      setBalancePayError('Masukkan password akun untuk konfirmasi.')
+      return
+    }
+    setIsBalancePayBusy(true)
+    setBalancePayError('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=pay-invoice-balance', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ invoice_id: String(invoicePayModal.id), password: balancePayPassword }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || result?.result !== true) {
+        throw new Error(result?.error || 'Pembayaran dengan saldo gagal diproses.')
+      }
+      setInvoicePayModal(null)
+      setBalancePayOpen(false)
+      setInvoicePayMethod('')
+      setInvoicePayError('')
+      setBalancePayPassword('')
+      setBalancePayError('')
+      setNotice(`Tagihan ${invoicePayModal.number || `#${invoicePayModal.id}`} berhasil dibayar dengan saldo.`)
+      setWalletLoadAttempt((attempt) => attempt + 1)
+      setInvoiceLoadAttempt((attempt) => attempt + 1)
+      setServiceLoadAttempt((attempt) => attempt + 1)
+    } catch (error) {
+      setBalancePayError(error.message || 'Pembayaran dengan saldo gagal diproses.')
+    } finally {
+      setIsBalancePayBusy(false)
+    }
+  }
+
+  const handlePayInvoice = async () => {
+    if (!invoicePayModal) return
+    if (!invoicePayMethod) {
+      setInvoicePayError('Pilih metode pembayaran terlebih dahulu.')
+      return
+    }
+    setIsPayingInvoice(true)
+    setInvoicePayError('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=pay-invoice', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ invoice_id: String(invoicePayModal.id), method: invoicePayMethod }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || typeof result?.payment?.payment_id !== 'string') {
+        throw new Error(result?.error || 'Pembayaran gagal diproses.')
+      }
+      setPaymentResult(result)
+      setPaymentStatus({ state: 'idle', data: null, error: '' })
+      setInvoicePayModal(null)
+      setInvoicePayMethod('')
+      openPage('payment')
+      loadPaymentStatus(result.payment.payment_id)
+    } catch (error) {
+      setInvoicePayError(error.message || 'Pembayaran gagal diproses.')
+    } finally {
+      setIsPayingInvoice(false)
     }
   }
 
@@ -949,12 +1337,13 @@ function ClientDashboardPage() {
       return (
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading">
-            <div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Status pembayaran</h2><p>Data respons dari Komerce untuk pembayaran Virtual Account.</p></div>
+            <div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Status pembayaran</h2><p>Data respons dari {created?.payment_type === 'gopay' ? 'gateway QRIS GoPay' : 'Komerce'} untuk pembayaran {created?.payment_type === 'qris' ? 'QRIS' : created?.payment_type === 'gopay' ? 'QRIS GoPay' : 'Virtual Account'}.</p></div>
           </div>
           {!created ? (
             <div className="dashboard-empty-state"><span><CreditCard size={22} /></span><strong>Belum ada pembayaran</strong><p>Mulai dari keranjang untuk membuat pembayaran.</p><button className="dashboard-outline-action" type="button" onClick={() => openPage('orders')}>Lihat produk</button></div>
           ) : (
             <div className="dashboard-payment-result">
+              {['qris', 'gopay'].includes(created.payment_type) ? <QrisPanel payment={created} /> : (
               <div className="dashboard-payment-va">
                 <div>
                   <small>Nomor Virtual Account {created.bank_name || created.bank_code}</small>
@@ -966,21 +1355,23 @@ function ClientDashboardPage() {
                 </div>
                 {getPaymentGuide(created.bank_code)?.logo && <img src={getPaymentGuide(created.bank_code).logo} alt={created.bank_name || created.bank_code} referrerPolicy="no-referrer" />}
               </div>
+              )}
               {paymentStatus.state === 'loading' && <p className="dashboard-powered-by">Memuat status pembayaran...</p>}
               {paymentStatus.state === 'error' && <p className="dashboard-checkout-error" role="alert">{paymentStatus.error}</p>}
               {rows.length > 0 && <dl className="dashboard-payment-data">{rows.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{String(value)}</dd></div>)}</dl>}
               <div className="dashboard-payment-actions">
               <button className="dashboard-outline-action" type="button" disabled={statusCooldown || paymentStatus.state === 'loading'} onClick={() => loadPaymentStatus(created.payment_id)}>Perbarui status</button>
               <button className="dashboard-danger-action" type="button" disabled={paymentStatus.data?.status !== 'PENDING'} onClick={() => { setCancelError(''); setCancelOpen(true) }}>Batalkan pesanan</button>
+              {komercePaymentUrl(created.payment_url) && <a className="dashboard-outline-action" href={komercePaymentUrl(created.payment_url)} target="_blank" rel="noopener noreferrer">Buka halaman pembayaran (uji)</a>}
               </div>
-              <PaymentGuide bankCode={created.bank_code} />
+              {!['qris', 'gopay'].includes(created.payment_type) && <PaymentGuide bankCode={created.bank_code} />}
             </div>
           )}
           {cancelOpen && (
             <div className="dashboard-modal-backdrop" role="presentation">
               <div className="dashboard-modal" role="dialog" aria-modal="true" aria-labelledby="cancel-title">
                 <h3 id="cancel-title">Batalkan pesanan?</h3>
-                <p>Virtual Account akan dinonaktifkan dan tidak dapat dipakai lagi.</p>
+                <p>{created?.payment_type === 'qris' ? 'Kode QRIS tidak boleh dibayar lagi setelah pesanan dibatalkan.' : 'Virtual Account akan dinonaktifkan dan tidak dapat dipakai lagi.'}</p>
                 <label>Alasan pembatalan
                   <select value={cancelReason} onChange={(event) => { setCancelReason(event.target.value); setCancelError('') }}>
                     <option value="">Pilih alasan</option>
@@ -1043,7 +1434,7 @@ function ClientDashboardPage() {
                 {paymentMethods.status === 'error' && <p className="dashboard-checkout-error" role="alert">{paymentMethods.error}</p>}
                 {(() => {
                   const methodId = (method) => `${method.payment_type}:${method.bank_code || ''}`
-                  const vaMethods = paymentMethods.items.filter((method) => method.payment_type === 'va')
+                  const vaMethods = paymentMethods.items.filter((method) => method.payment_type === 'va' && method.bank_code !== 'BJB' && method.bank_code !== 'SMBC' && method.bank_code !== 'DBS')
                   const qrisMethod = paymentMethods.items.find((method) => method.payment_type === 'qris')
                   const otherMethods = paymentMethods.items.filter((method) => method.payment_type !== 'va' && method.payment_type !== 'qris')
                   return (
@@ -1060,13 +1451,23 @@ function ClientDashboardPage() {
                               </button>
                             ))}
                             {qrisMethod && (
-                              <button type="button" role="radio" aria-checked={paymentMethod === methodId(qrisMethod)} aria-label="QRIS" title="QRIS" className={`dashboard-bank-option${paymentMethod === methodId(qrisMethod) ? ' is-active' : ''}`} onClick={() => { setPaymentMethod(methodId(qrisMethod)); setCheckoutError('') }}>
+                              <button type="button" role="radio" aria-checked={paymentMethod === methodId(qrisMethod)} aria-label="QRIS Komerce" title="QRIS Komerce" className={`dashboard-bank-option dashboard-bank-qris${paymentMethod === methodId(qrisMethod) ? ' is-active' : ''}`} onClick={() => { setPaymentMethod(methodId(qrisMethod)); setCheckoutError('') }}>
                                 <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                                <span>Komerce</span>
                               </button>
                             )}
+                            <button type="button" role="radio" aria-checked={paymentMethod === 'gopay:'} aria-label="QRIS GoPay" title="QRIS GoPay" className={`dashboard-bank-option dashboard-bank-qris${paymentMethod === 'gopay:' ? ' is-active' : ''}`} onClick={() => { setPaymentMethod('gopay:'); setCheckoutError('') }}>
+                              <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                              <span>GoPay</span>
+                            </button>
+                            <button type="button" className="dashboard-bank-option dashboard-bank-balance" aria-label="Bayar dengan saldo" title="Bayar dengan saldo" onClick={() => { setCheckoutBalancePassword(''); setCheckoutBalanceError(''); setCheckoutBalanceOpen(true) }}>
+                              <Wallet size={22} />
+                              <span>Saldo</span>
+                            </button>
                           </div>
                           <p className="dashboard-fee-note">* Biaya transaksi virtual account Rp 4.440,-</p>
-                          <p className="dashboard-fee-note">* Biaya transaksi menggunakan QRIS 0,7% + 0,29%.</p>
+                          <p className="dashboard-fee-note">* Biaya transaksi menggunakan QRIS Komerce 0,7% + 0,29%.</p>
+                          <p className="dashboard-fee-note">* QRIS GoPay tanpa biaya tambahan; nominal akhir mendapat kode unik.</p>
                         </>
                       )}
                       {otherMethods.length > 0 && (
@@ -1092,6 +1493,9 @@ function ClientDashboardPage() {
                   <div><dt>Subtotal</dt><dd>{formatFullPrice(cart.total, cart.currency)}</dd></div>
                   {paymentMethod && <div><dt>Biaya transaksi</dt><dd>{formatFullPrice(transactionFee(paymentMethod, cart.total), cart.currency)}</dd></div>}
                 </dl>
+                {cart.items.some((item) => activeProductExpiry[String(item.product_id)]) && (
+                  <p className="dashboard-product-renew-note">Beberapa produk di keranjang masih aktif di akunmu — setelah pembayaran berhasil, durasi produk yang sama akan bertambah, bukan membuat produk baru.</p>
+                )}
                 <div className="dashboard-checkout-total"><span>Total</span><strong>{formatFullPrice(Number(cart.total) + transactionFee(paymentMethod, cart.total), cart.currency)}</strong></div>
                 <button className="dashboard-primary-action dashboard-checkout-button" type="button" disabled={cart.items.length === 0 || isCartBusy || isPaying} onClick={handleCheckout}>
                   <CreditCard size={16} /> Checkout
@@ -1132,9 +1536,14 @@ function ClientDashboardPage() {
                   { id: '1M', label: 'Bulanan', price: product.monthly_price, unit: 'bulan' },
                   { id: '1Y', label: 'Tahunan', price: product.annual_price, unit: 'tahun' },
                 ]
+                const productExpiry = activeProductExpiry[String(product.id)]
+                const expiryLabel = productExpiry
+                  ? new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(productExpiry))
+                  : null
                 const head = (
                   <div className="dashboard-product-head">
                     <h3>{product.name}</h3>
+                    {productExpiry && <span className="dashboard-product-active-badge">Aktif s.d. {expiryLabel}</span>}
                     {product.storage && <strong className="dashboard-product-storage">{product.storage}</strong>}
                   </div>
                 )
@@ -1156,6 +1565,11 @@ function ClientDashboardPage() {
                     <button className="dashboard-product-back" type="button" onClick={() => { setSelectedProductId(null); setSelectedPeriod(null) }}><ArrowLeft size={14} /> Pilih produk lain</button>
                     {head}
                     {product.description && <p>{product.description}</p>}
+                    {productExpiry && (
+                      <p className="dashboard-product-renew-note">
+                        Produk ini masih aktif hingga <strong>{expiryLabel}</strong>. Pembelian ini akan menambah durasi masa aktif produk yang sama, bukan membuat produk baru.
+                      </p>
+                    )}
                     <div className="dashboard-period-options" role="radiogroup" aria-label="Periode berlangganan">
                       {periods.map((period) => (
                         <button type="button" role="radio" aria-checked={selectedPeriod === period.id} className={`dashboard-period-option${selectedPeriod === period.id ? ' is-active' : ''}`} key={period.id} onClick={() => setSelectedPeriod(period.id)}>
@@ -1387,8 +1801,28 @@ function ClientDashboardPage() {
     }
 
     if (activePage === 'services') {
-      const pageCount = Math.ceil(serviceOrders.length / servicesPerPage)
-      const visibleOrders = serviceOrders.slice((servicePage - 1) * servicesPerPage, servicePage * servicesPerPage)
+      const startOfTodaySort = new Date()
+      startOfTodaySort.setHours(0, 0, 0, 0)
+      const serviceStatusRank = (service) => {
+        const status = String(service.status || '').toLowerCase()
+        if (['canceled', 'cancelled'].includes(status)) return 2
+        if (status === 'active' || status === 'paid') {
+          const expiry = service.expires_at ? new Date(String(service.expires_at).replace(' ', 'T')) : null
+          const expired = expiry && !Number.isNaN(expiry.getTime()) && expiry < startOfTodaySort
+          return expired ? 1 : 0
+        }
+        return 1
+      }
+      const sortedServiceOrders = [...serviceOrders].sort((a, b) => {
+        const rankDiff = serviceStatusRank(a) - serviceStatusRank(b)
+        if (rankDiff !== 0) return rankDiff
+        const aExp = a.expires_at ? new Date(String(a.expires_at).replace(' ', 'T')).getTime() : Number.MAX_SAFE_INTEGER
+        const bExp = b.expires_at ? new Date(String(b.expires_at).replace(' ', 'T')).getTime() : Number.MAX_SAFE_INTEGER
+        if (aExp !== bExp) return aExp - bExp
+        return Number(b.id) - Number(a.id)
+      })
+      const pageCount = Math.ceil(sortedServiceOrders.length / servicesPerPage)
+      const visibleOrders = sortedServiceOrders.slice((servicePage - 1) * servicesPerPage, servicePage * servicesPerPage)
       return (
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">AKUN PELANGGAN</span><h2>Layanan</h2><p>Kelola layanan dan lihat jadwal perpanjanganmu.</p></div></div>
@@ -1405,36 +1839,54 @@ function ClientDashboardPage() {
                 <table>
                   <thead><tr><th>ORDER</th><th>PRODUK / LAYANAN</th><th>HARGA</th><th>JATUH TEMPO</th><th>STATUS</th><th>AKSI</th></tr></thead>
                   <tbody>{visibleOrders.length ? visibleOrders.map((service) => {
-                    const status = service.status.toLowerCase()
-                    const statusLabels = {
-                      active: 'Aktif',
-                      canceled: 'Dibatalkan',
-                      cancelled: 'Dibatalkan',
-                      expired: 'Kedaluwarsa',
-                      pending: 'Menunggu',
-                      pending_setup: 'Menunggu pembayaran',
-                      suspended: 'Ditangguhkan',
-                    }
+                    const status = String(service.status || '').toLowerCase()
                     const currency = typeof service.currency === 'string' && /^[A-Za-z]{3}$/.test(service.currency)
                       ? service.currency.toUpperCase()
                       : ''
-                    const priceLabel = currency && service.price !== null && service.price !== undefined
-                      ? `${currency} ${formatCompactPrice(service.price)}${formatServicePeriod(service.period)}`
+                    const priceValue = service.price === null || service.price === undefined || service.price === ''
+                      ? null
+                      : Number(service.price)
+                    const periodName = servicePeriodLabel(service.period)
+                    const priceLabel = Number.isFinite(priceValue)
+                      ? `${formatFullPrice(priceValue, currency || 'IDR')}${periodName ? ` / ${periodName}` : ''}`
                       : '-'
                     const dueDate = service.expires_at
-                      ? new Date(service.expires_at.replace(' ', 'T'))
+                      ? new Date(String(service.expires_at).replace(' ', 'T'))
                       : null
-                    const dueLabel = dueDate && !Number.isNaN(dueDate.getTime())
+                    const dueValid = dueDate && !Number.isNaN(dueDate.getTime())
+                    const dueLabel = dueValid
                       ? new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }).format(dueDate)
                       : service.expires_at || '-'
-                    const statusLabel = statusLabels[status]
-                      || status.replace(/[_-]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+                    const startOfToday = new Date()
+                    startOfToday.setHours(0, 0, 0, 0)
+                    const isPastDue = Boolean(dueValid) && dueDate < startOfToday
+                    const pendingStatuses = ['pending', 'pending_setup', 'unpaid', 'awaiting_payment']
+                    const paidStatuses = ['paid', 'active']
+                    const cancelledStatuses = ['canceled', 'cancelled']
+                    const expiredStatuses = ['expired', 'overdue', 'failed', 'failed_setup']
+                    const fallbackLabel = status.replace(/[_-]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+
+                    let statusLabel = fallbackLabel || 'Tidak diketahui'
+                    let statusTone = 'status-closed'
+                    if (paidStatuses.includes(status)) {
+                      statusLabel = 'Aktif'
+                      statusTone = 'status-active'
+                    } else if (cancelledStatuses.includes(status)) {
+                      statusLabel = 'Dibatalkan'
+                    } else if (expiredStatuses.includes(status) || (isPastDue && pendingStatuses.includes(status))) {
+                      statusLabel = 'Kedaluwarsa'
+                    } else if (pendingStatuses.includes(status)) {
+                      statusLabel = 'Menunggu pembayaran'
+                      statusTone = 'status-pending'
+                    } else if (status === 'suspended') {
+                      statusLabel = 'Ditangguhkan'
+                    }
 
                     return (
                       <tr key={service.id}>
                         <td><button className="dashboard-text-action" type="button" onClick={() => setNotice(`Detail order #${service.id} akan tersedia setelah API FossBilling terhubung.`)}>#{service.id}</button></td>
                         <td>{service.title}</td><td>{priceLabel}</td><td>{dueLabel}</td>
-                        <td><span className={`dashboard-status ${status === 'active' ? 'status-active' : 'status-pending'}`}><i />{statusLabel}</span></td>
+                        <td><span className={`dashboard-status ${statusTone}`}><i />{statusLabel}</span></td>
                         <td><button className="dashboard-outline-action" type="button" onClick={() => setNotice(`Pengelolaan ${service.title} akan tersedia setelah API FossBilling terhubung.`)}>Kelola</button></td>
                       </tr>
                     )
@@ -1457,22 +1909,361 @@ function ClientDashboardPage() {
     }
 
     if (activePage === 'invoices') {
-      const filterStatuses = ['Menunggu', 'Lunas', 'Dikembalikan', 'Dibatalkan']
-      const filteredInvoices = invoices.filter((invoice) => invoice.status === invoiceFilter)
+      // ── Invoice detail sub-page ──────────────────────────────────────────────
+      if (invoiceDetail !== null) {
+        const inv = invoiceDetail
+        const currency = typeof inv.currency === 'string' && /^[A-Za-z]{3}$/.test(inv.currency)
+          ? inv.currency.toUpperCase()
+          : 'IDR'
+        const { label: statusLabel, tone: statusTone } = invoiceStatusDisplay(inv.status)
+        const lines = Array.isArray(inv.lines) ? inv.lines : []
+
+        const handlePdfDownload = async () => {
+          if (isPdfDownloading) return
+          setIsPdfDownloading(true)
+          try {
+            const response = await fetch(`/api/fossbilling-auth.php?action=invoice-pdf&id=${encodeURIComponent(inv.id)}`, { credentials: 'same-origin' })
+            if (!response.ok) {
+              const result = await response.json().catch(() => null)
+              throw new Error(result?.error || 'PDF tidak dapat diunduh.')
+            }
+            const blob = await response.blob()
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = `${inv.number || `invoice-${inv.id}`}.pdf`
+            a.click()
+            URL.revokeObjectURL(url)
+          } catch (err) {
+            setNotice(err.message || 'PDF tidak dapat diunduh.')
+          } finally {
+            setIsPdfDownloading(false)
+          }
+        }
+
+        const handlePrint = () => {
+          window.print()
+        }
+
+        return (
+          <section className="dashboard-page-panel">
+            <div className="dashboard-page-heading dashboard-invoice-detail-heading">
+              <div>
+                <nav className="dashboard-breadcrumb" aria-label="Navigasi">
+                  <button type="button" onClick={() => { setInvoiceDetail(null); setInvoiceDetailState('idle'); setInvoiceDetailError('') }}>
+                    <ArrowLeft size={13} /> Tagihan
+                  </button>
+                  <ChevronRight size={13} />
+                  <strong>{inv.number || `#${inv.id}`}</strong>
+                </nav>
+                <h2>Ringkasan Tagihan</h2>
+                <p>Rincian tagihan {inv.number || `#${inv.id}`}.</p>
+              </div>
+              <div className="dashboard-invoice-detail-actions no-print">
+                <button
+                  type="button"
+                  className="dashboard-outline-action"
+                  onClick={handlePdfDownload}
+                  disabled={isPdfDownloading}
+                  title="Unduh PDF"
+                >
+                  <ArrowDownToLine size={15} />
+                  {isPdfDownloading ? 'Mengunduh...' : 'Unduh PDF'}
+                </button>
+                <button
+                  type="button"
+                  className="dashboard-outline-action"
+                  onClick={handlePrint}
+                  title="Cetak tagihan"
+                >
+                  <FileText size={15} />
+                  Cetak
+                </button>
+              </div>
+            </div>
+
+            <div className="dashboard-invoice-summary">
+              {/* Header info */}
+              <div className="dashboard-invoice-summary-header">
+                <div className="dashboard-invoice-summary-meta">
+                  <div className="dashboard-invoice-meta-row">
+                    <span>Nomor Tagihan</span>
+                    <strong>{inv.number || `#${inv.id}`}</strong>
+                  </div>
+                  <div className="dashboard-invoice-meta-row">
+                    <span>Status</span>
+                    <span className={`dashboard-status ${statusTone}`}><i />{statusLabel}</span>
+                  </div>
+                  <div className="dashboard-invoice-meta-row">
+                    <span>Tanggal Tagihan</span>
+                    <strong>{formatInvoiceDate(inv.created_at)}</strong>
+                  </div>
+                  {inv.due_at && (
+                    <div className="dashboard-invoice-meta-row">
+                      <span>Jatuh Tempo</span>
+                      <strong>{formatInvoiceDate(inv.due_at)}</strong>
+                    </div>
+                  )}
+                  {inv.paid_at && (
+                    <div className="dashboard-invoice-meta-row">
+                      <span>Tanggal Lunas</span>
+                      <strong>{formatInvoiceDate(inv.paid_at)}</strong>
+                    </div>
+                  )}
+                </div>
+                {/* Seller / Buyer */}
+                <div className="dashboard-invoice-parties">
+                  {inv.seller && (
+                    <div className="dashboard-invoice-party">
+                      <small>DARI</small>
+                      {inv.seller.company && <strong>{inv.seller.company}</strong>}
+                      {inv.seller.address && <span>{inv.seller.address}</span>}
+                      {inv.seller.phone && <span>{inv.seller.phone}</span>}
+                      {inv.seller.email && <span>{inv.seller.email}</span>}
+                    </div>
+                  )}
+                  {inv.buyer && (
+                    <div className="dashboard-invoice-party">
+                      <small>KEPADA</small>
+                      {(inv.buyer.first_name || inv.buyer.last_name) && (
+                        <strong>{[inv.buyer.first_name, inv.buyer.last_name].filter(Boolean).join(' ')}</strong>
+                      )}
+                      {inv.buyer.company && <span>{inv.buyer.company}</span>}
+                      {inv.buyer.email && <span>{inv.buyer.email}</span>}
+                      {inv.buyer.phone && <span>{inv.buyer.phone}</span>}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Line items */}
+              {lines.length > 0 && (
+                <div className="dashboard-invoice-lines">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Deskripsi</th>
+                        <th>Qty</th>
+                        <th>Harga Satuan</th>
+                        <th>Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {lines.map((line, idx) => (
+                        <tr key={idx}>
+                          <td>
+                            <strong>{line.title || '-'}</strong>
+                            {line.period && <small>{servicePeriodLabel(line.period) || line.period}</small>}
+                          </td>
+                          <td>{line.quantity ?? 1}</td>
+                          <td>{formatFullPrice(line.price, currency)}</td>
+                          <td>{formatFullPrice(line.total, currency)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Totals */}
+              <div className="dashboard-invoice-totals">
+                {inv.subtotal !== null && inv.subtotal !== undefined && inv.subtotal !== inv.total && (
+                  <div className="dashboard-invoice-total-row">
+                    <span>Subtotal</span>
+                    <span>{formatFullPrice(inv.subtotal, currency)}</span>
+                  </div>
+                )}
+                {inv.tax !== null && inv.tax !== undefined && inv.tax > 0 && (
+                  <div className="dashboard-invoice-total-row">
+                    <span>{inv.taxname || 'Pajak'}{inv.taxrate ? ` (${inv.taxrate}%)` : ''}</span>
+                    <span>{formatFullPrice(inv.tax, currency)}</span>
+                  </div>
+                )}
+                <div className="dashboard-invoice-total-row dashboard-invoice-grand-total">
+                  <span>Total</span>
+                  <strong>{formatFullPrice(inv.total, currency)}</strong>
+                </div>
+              </div>
+
+              {inv.notes && (
+                <div className="dashboard-invoice-notes">
+                  <small>Catatan</small>
+                  <p>{inv.notes}</p>
+                </div>
+              )}
+            </div>
+
+            {/* Bottom action bar (no-print) */}
+            <div className="dashboard-invoice-bottom-actions no-print">
+              <button
+                type="button"
+                className="dashboard-outline-action"
+                onClick={() => { setInvoiceDetail(null); setInvoiceDetailState('idle'); setInvoiceDetailError('') }}
+              >
+                <ArrowLeft size={15} /> Kembali ke Tagihan
+              </button>
+              <button
+                type="button"
+                className="dashboard-outline-action"
+                onClick={handlePdfDownload}
+                disabled={isPdfDownloading}
+              >
+                <ArrowDownToLine size={15} />
+                {isPdfDownloading ? 'Mengunduh...' : 'Unduh PDF'}
+              </button>
+              <button
+                type="button"
+                className="dashboard-outline-action"
+                onClick={handlePrint}
+              >
+                <FileText size={15} /> Cetak
+              </button>
+            </div>
+          </section>
+        )
+      }
+
+      // ── Invoice detail loading / error state ─────────────────────────────────
+      if (invoiceDetailState === 'loading') {
+        return (
+          <section className="dashboard-page-panel">
+            <div className="dashboard-profile-loading" role="status">Memuat rincian tagihan...</div>
+          </section>
+        )
+      }
+      if (invoiceDetailState === 'error') {
+        return (
+          <section className="dashboard-page-panel">
+            <div className="dashboard-profile-load-error" role="alert">
+              <p>{invoiceDetailError}</p>
+              <button type="button" className="dashboard-profile-retry" onClick={() => { setInvoiceDetailState('idle'); setInvoiceDetailError('') }}>Kembali</button>
+            </div>
+          </section>
+        )
+      }
+
+      // ── Invoice list ─────────────────────────────────────────────────────────
+      const invoiceStatusFilters = [
+        { label: 'Menunggu', statuses: ['unpaid'] },
+        { label: 'Lunas', statuses: ['paid'] },
+        { label: 'Dikembalikan', statuses: ['refunded'] },
+        { label: 'Dibatalkan', statuses: ['canceled'] },
+      ]
+      const activeFilter = invoiceStatusFilters.find((filter) => filter.label === invoiceFilter) || invoiceStatusFilters[0]
+      const filteredInvoices = invoiceRecords.filter((invoice) => activeFilter.statuses.includes(invoice.status))
+      const startOfToday = new Date()
+      startOfToday.setHours(0, 0, 0, 0)
+
+      const openInvoiceDetail = (invoice) => {
+        setInvoiceDetailState('loading')
+        setInvoiceDetailError('')
+        setInvoiceDetail(null)
+        fetch(`/api/fossbilling-auth.php?action=invoice&id=${encodeURIComponent(invoice.id)}`, { credentials: 'same-origin' })
+          .then(async (response) => {
+            const result = await response.json().catch(() => null)
+            if (!response.ok || !result?.invoice) {
+              throw new Error(result?.error || 'Rincian tagihan tidak dapat dimuat.')
+            }
+            setInvoiceDetail(result.invoice)
+            setInvoiceDetailState('loaded')
+          })
+          .catch((error) => {
+            setInvoiceDetailError(error.message || 'Rincian tagihan tidak dapat dimuat.')
+            setInvoiceDetailState('error')
+          })
+      }
+
       return (
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Tagihan</h2><p>Lihat status dan riwayat tagihan akunmu.</p></div></div>
           <div className="dashboard-filter-tabs" role="tablist" aria-label="Filter tagihan">
-            {filterStatuses.map((status) => <button type="button" role="tab" aria-selected={invoiceFilter === status} className={invoiceFilter === status ? 'dashboard-filter-active' : ''} key={status} onClick={() => setInvoiceFilter(status)}>{status}</button>)}
+            {invoiceStatusFilters.map((filter) => <button type="button" role="tab" aria-selected={invoiceFilter === filter.label} className={invoiceFilter === filter.label ? 'dashboard-filter-active' : ''} key={filter.label} onClick={() => { setInvoiceFilter(filter.label); setInvoicePage(1) }}>{filter.label}</button>)}
           </div>
-          <div className="dashboard-table-wrap dashboard-wide-table">
-            <table>
-              <thead><tr><th>NOMOR</th><th>TANGGAL TAGIHAN</th><th>JATUH TEMPO</th><th>TOTAL</th><th>STATUS</th><th>AKSI</th></tr></thead>
-              <tbody>{filteredInvoices.length ? filteredInvoices.map((invoice) => (
-                <tr key={invoice.id}><td><strong>{invoice.id}</strong></td><td>{invoice.date}</td><td>{invoice.due}</td><td className="invoice-amount">{invoice.amount}</td><td><span className={`dashboard-status ${invoice.status === 'Lunas' ? 'status-paid' : 'status-pending'}`}><i />{invoice.status}</span></td><td><button className="dashboard-outline-action" type="button" onClick={() => setNotice('Detail tagihan akan tersedia setelah API FossBilling terhubung.')}>Lihat</button></td></tr>
-              )) : <tr><td className="dashboard-table-empty" colSpan="6">Belum ada tagihan dengan status ini.</td></tr>}</tbody>
-            </table>
-          </div>
+          {invoiceState === 'loading' ? (
+            <div className="dashboard-profile-loading" role="status">Memuat daftar tagihan...</div>
+          ) : invoiceState === 'error' ? (
+            <div className="dashboard-profile-load-error" role="alert">
+              <p>{invoiceError}</p>
+              <button type="button" className="dashboard-profile-retry" onClick={() => setInvoiceLoadAttempt((attempt) => attempt + 1)}>Coba lagi</button>
+            </div>
+          ) : (() => {
+            const invoicesPerPage = 10
+            const pageCount = Math.ceil(filteredInvoices.length / invoicesPerPage)
+            const safePage = Math.min(invoicePage, pageCount || 1)
+            const visibleInvoices = filteredInvoices.slice((safePage - 1) * invoicesPerPage, safePage * invoicesPerPage)
+            return (
+              <>
+                <div className="dashboard-table-wrap dashboard-wide-table">
+                  <table>
+                    <thead><tr><th>NOMOR</th><th>TANGGAL TAGIHAN</th><th>JATUH TEMPO</th><th>TOTAL</th><th>STATUS</th><th>AKSI</th></tr></thead>
+                    <tbody>{visibleInvoices.length ? visibleInvoices.map((invoice) => {
+                      const status = String(invoice.status || '').toLowerCase()
+                      const currency = typeof invoice.currency === 'string' && /^[A-Za-z]{3}$/.test(invoice.currency)
+                        ? invoice.currency.toUpperCase()
+                        : 'IDR'
+                      const amountLabel = invoice.total === null || invoice.total === undefined
+                        ? '-'
+                        : formatFullPrice(invoice.total, currency)
+                      const dueDate = invoice.due_at ? new Date(String(invoice.due_at).replace(' ', 'T')) : null
+                      const dueValid = dueDate && !Number.isNaN(dueDate.getTime())
+                      const dueLabel = formatInvoiceDate(invoice.due_at)
+                      const isPastDue = status === 'unpaid' && dueValid && dueDate < startOfToday
+
+                      let statusLabel = 'Menunggu pembayaran'
+                      let statusTone = 'status-pending'
+                      if (status === 'paid') {
+                        statusLabel = 'Lunas'
+                        statusTone = 'status-paid'
+                      } else if (status === 'refunded') {
+                        statusLabel = 'Dikembalikan'
+                        statusTone = 'status-closed'
+                      } else if (status === 'canceled' || status === 'cancelled') {
+                        statusLabel = 'Dibatalkan'
+                        statusTone = 'status-closed'
+                      } else if (status === 'unpaid' && isPastDue) {
+                        statusTone = 'status-closed'
+                      }
+                      const isPayable = status === 'unpaid'
+
+                      return (
+                        <tr key={invoice.id}>
+                          <td><strong>{invoice.number || `#${invoice.id}`}</strong>{invoice.title ? <small>{invoice.title}</small> : null}</td>
+                          <td>{formatInvoiceDate(invoice.created_at)}</td>
+                          <td>{dueLabel}</td>
+                          <td className="invoice-amount">{amountLabel}</td>
+                          <td><span className={`dashboard-status ${statusTone}`}><i />{statusLabel}</span></td>
+                          <td>
+                            <button
+                              className="dashboard-outline-action"
+                              type="button"
+                              onClick={() => {
+                                if (isPayable && !isPastDue) {
+                                  setInvoicePayModal(invoice)
+                                  setInvoicePayMethod('')
+                                  setInvoicePayError('')
+                                } else {
+                                  openInvoiceDetail(invoice)
+                                }
+                              }}
+                            >{isPayable && !isPastDue ? 'Bayar' : 'Lihat'}</button>
+                          </td>
+                        </tr>
+                      )
+                    }) : <tr><td className="dashboard-table-empty" colSpan="6">Belum ada tagihan dengan status ini.</td></tr>}</tbody>
+                  </table>
+                </div>
+                {pageCount > 1 && (
+                  <div className="dashboard-pagination">
+                    <span>Halaman {safePage} dari {pageCount}</span>
+                    <div>
+                      <button type="button" className="dashboard-outline-action" onClick={() => setInvoicePage((p) => p - 1)} disabled={safePage === 1}>Sebelumnya</button>
+                      <button type="button" className="dashboard-outline-action" onClick={() => setInvoicePage((p) => p + 1)} disabled={safePage === pageCount}>Selanjutnya</button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )
+          })()}
         </section>
       )
     }
@@ -1487,13 +2278,36 @@ function ClientDashboardPage() {
     }
 
     if (activePage === 'wallet') {
+      const walletLoading = wallet.status === 'idle' || wallet.status === 'loading'
       return (
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Dompet</h2><p>Saldo akun dan aktivitas transaksi.</p></div></div>
-          <div className="dashboard-wallet-card"><span className="dashboard-stat-icon stat-icon-teal"><Wallet size={19} /></span><span>Saldo akun</span><strong>Rp250.000</strong><small>Saldo contoh · belum tersinkron dengan FossBilling</small><button className="dashboard-primary-action" type="button" onClick={() => setNotice('Penambahan saldo akan tersedia setelah API FossBilling terhubung.')}><CreditCard size={16} /> Tambah saldo</button></div>
-          <div className="dashboard-section-heading dashboard-wallet-heading"><div><span className="dashboard-section-kicker">AKTIVITAS</span><h2>Transaksi terbaru</h2></div></div>
-          <div className="dashboard-transaction-row"><span className="dashboard-transaction-icon"><CreditCard size={17} /></span><span><strong>Pembayaran tagihan INV-2026-012</strong><small>18 Sep 2026</small></span><strong className="dashboard-transaction-amount">− Rp149.000</strong></div>
-          <div className="dashboard-transaction-row"><span className="dashboard-transaction-icon"><Wallet size={17} /></span><span><strong>Pengisian saldo</strong><small>10 Sep 2026</small></span><strong className="dashboard-transaction-credit">+ Rp250.000</strong></div>
+          {wallet.status === 'error' ? (
+            <div className="dashboard-profile-load-error" role="alert">
+              <p>{wallet.error}</p>
+              <button type="button" className="dashboard-profile-retry" onClick={() => setWalletLoadAttempt((attempt) => attempt + 1)}>Coba lagi</button>
+            </div>
+          ) : walletLoading ? (
+            <div className="dashboard-profile-loading" role="status">Memuat dompet...</div>
+          ) : (
+            <>
+              <div className="dashboard-wallet-card"><span className="dashboard-stat-icon stat-icon-teal"><Wallet size={19} /></span><span>Saldo akun</span><strong>{formatFullPrice(wallet.balance, wallet.currency)}</strong><small>Saldo tersinkron dengan FossBilling</small><button className="dashboard-primary-action" type="button" onClick={() => { setTopupAmount(''); setTopupMethod(''); setTopupError(''); setTopupOpen(true) }}><CreditCard size={16} /> Tambah saldo</button></div>
+              <div className="dashboard-section-heading dashboard-wallet-heading"><div><span className="dashboard-section-kicker">AKTIVITAS</span><h2>Transaksi terbaru</h2></div></div>
+              {wallet.transactions.length ? wallet.transactions.map((transaction) => {
+                const amount = Number(transaction.amount)
+                const credit = Number.isFinite(amount) && amount >= 0
+                return (
+                  <div className="dashboard-transaction-row" key={transaction.id}>
+                    <span className="dashboard-transaction-icon">{credit ? <Wallet size={17} /> : <CreditCard size={17} />}</span>
+                    <span><strong>{transaction.description || 'Transaksi saldo'}</strong><small>{formatInvoiceDate(transaction.created_at)}</small></span>
+                    <strong className={credit ? 'dashboard-transaction-credit' : 'dashboard-transaction-amount'}>{credit ? '+ ' : '− '}{formatFullPrice(Math.abs(amount), transaction.currency || wallet.currency)}</strong>
+                  </div>
+                )
+              }) : (
+                <div className="dashboard-empty-state"><span><Wallet size={22} /></span><strong>Belum ada transaksi</strong><p>Aktivitas saldo akan muncul di sini.</p></div>
+              )}
+            </>
+          )}
         </section>
       )
     }
@@ -1554,7 +2368,7 @@ function ClientDashboardPage() {
             >
               <Icon size={18} />
               <span>{label}</span>
-              {id === 'invoices' && <span className="dashboard-nav-count">1</span>}
+              {id === 'invoices' && unpaidInvoiceCount > 0 && <span className="dashboard-nav-count">{unpaidInvoiceCount}</span>}
               {id === 'support' && supportUnread > 0 && <span className="dashboard-nav-count">{supportUnread}</span>}
             </button>
           ))}
@@ -1563,7 +2377,6 @@ function ClientDashboardPage() {
             <span>Storage Area</span>
           </button>
         </nav>
-        <div className="dashboard-sidebar-balance"><span>Saldo akun</span><strong>Rp250.000</strong></div>
         <div className="dashboard-sidebar-bottom">
           <div className="dashboard-help-card">
             <span className="dashboard-help-icon"><CircleHelp size={19} /></span>
@@ -1619,6 +2432,10 @@ function ClientDashboardPage() {
               </div>
             )}
           </div>
+          <button className="dashboard-topbar-balance" type="button" onClick={() => openPage('wallet')} title="Buka dompet">
+            <Wallet size={16} />
+            <span className="dashboard-topbar-balance-copy"><small>Saldo akun</small><strong>{wallet.status === 'loaded' ? formatFullPrice(wallet.balance, wallet.currency) : wallet.status === 'error' ? '—' : '…'}</strong></span>
+          </button>
           <NotificationBell
             notifications={notifications}
             open={bellOpen}
@@ -1726,12 +2543,23 @@ function ClientDashboardPage() {
                 <table>
                   <thead><tr><th>Nomor</th><th>Tanggal</th><th>Total</th><th>Status</th><th /></tr></thead>
                   <tbody>
-                    {invoices.map((invoice) => (
+                    {(invoiceState === 'loaded'
+                      ? invoiceRecords.slice(0, 3).map((invoice) => ({
+                          id: invoice.number || `#${invoice.id}`,
+                          date: formatInvoiceDate(invoice.created_at),
+                          due: formatInvoiceDate(invoice.due_at),
+                          amount: invoice.total === null || invoice.total === undefined
+                            ? '-'
+                            : formatFullPrice(invoice.total, invoice.currency || 'IDR'),
+                          status: invoice.status,
+                        }))
+                      : invoices
+                    ).map((invoice) => (
                       <tr key={invoice.id}>
                         <td><strong>{invoice.id}</strong><small>Jatuh tempo {invoice.due}</small></td>
                         <td>{invoice.date}</td>
                         <td className="invoice-amount">{invoice.amount}</td>
-                        <td><span className={`dashboard-status ${invoice.status === 'Lunas' ? 'status-paid' : 'status-pending'}`}><i />{invoice.status}</span></td>
+                        <td><span className={`dashboard-status ${invoiceStatusDisplay(invoice.status).tone}`}><i />{invoiceStatusDisplay(invoice.status).label}</span></td>
                         <td><button type="button" className="invoice-download" aria-label={`Unduh ${invoice.id}`} onClick={() => setNotice('Unduh invoice akan tersedia setelah API FossBilling dihubungkan.')}><ArrowDownToLine size={16} /></button></td>
                       </tr>
                     ))}
@@ -1762,6 +2590,23 @@ function ClientDashboardPage() {
           ) : renderMenuPage()}
           <footer className="dashboard-footer"><span>Ruang digital yang lebih personal.</span><span><FileText size={13} /> Privasi & keamanan adalah prioritas kami.</span></footer>
         </div>
+        {periodConflict && (
+          <div className="dashboard-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPeriodConflict(null) }}>
+            <div className="dashboard-modal" role="dialog" aria-modal="true" aria-labelledby="period-conflict-title">
+              <h3 id="period-conflict-title">Ganti durasi produk?</h3>
+              <p>
+                <strong>{periodConflict.title}</strong> sudah ada di keranjang dengan durasi{' '}
+                <strong>{periodLabels[periodConflict.existing_period] || periodConflict.existing_period}</strong>.
+                Produk itu akan dihapus dan digantikan dengan durasi{' '}
+                <strong>{periodLabels[periodConflict.new_period] || periodConflict.new_period}</strong>.
+              </p>
+              <div className="dashboard-modal-actions">
+                <button className="dashboard-outline-action" type="button" disabled={isCartBusy} onClick={() => setPeriodConflict(null)}>Batal</button>
+                <button className="dashboard-primary-action" type="button" disabled={isCartBusy} onClick={handleReplacePeriod}>{isCartBusy ? 'Mengganti...' : 'Ya, ganti durasi'}</button>
+              </div>
+            </div>
+          </div>
+        )}
         {ticketModalOpen && (
           <div className="dashboard-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setTicketModalOpen(false) }}>
             <form
@@ -1789,6 +2634,227 @@ function ClientDashboardPage() {
                 <button className="dashboard-primary-action" type="submit" disabled={isCreatingTicket || helpdeskState !== 'loaded'}>{isCreatingTicket ? 'Mengirim...' : 'Kirim'}</button>
               </div>
             </form>
+          </div>
+        )}
+        {invoicePayModal && (
+          <div
+            className="dashboard-modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => { if (event.target === event.currentTarget && !isPayingInvoice) { setInvoicePayModal(null); setBalancePayOpen(false); setInvoicePayMethod(''); setInvoicePayError('') } }}
+          >
+            <div className="dashboard-modal" role="dialog" aria-modal="true" aria-labelledby="invoice-pay-modal-title" onKeyDown={(event) => { if (event.key === 'Escape' && !isPayingInvoice) { setInvoicePayModal(null); setBalancePayOpen(false); setInvoicePayMethod(''); setInvoicePayError('') } }}>
+              <div className="dashboard-modal-header">
+                <h3 id="invoice-pay-modal-title">Bayar tagihan {invoicePayModal.number || `#${invoicePayModal.id}`}</h3>
+                <button type="button" onClick={() => { if (!isPayingInvoice) { setInvoicePayModal(null); setBalancePayOpen(false); setInvoicePayMethod(''); setInvoicePayError('') } }} aria-label="Tutup" disabled={isPayingInvoice}><X size={18} /></button>
+              </div>
+              <div className="dashboard-modal-body">
+                <p className="dashboard-powered-by">
+                  Total: <strong>{invoicePayModal.total === null || invoicePayModal.total === undefined ? '-' : formatFullPrice(invoicePayModal.total, invoicePayModal.currency || 'IDR')}</strong>
+                  {invoicePayModal.due_at ? ` · Jatuh tempo ${formatInvoiceDate(invoicePayModal.due_at)}` : ''}
+                </p>
+                {paymentMethods.status === 'loading' && <p className="dashboard-powered-by">Memuat metode pembayaran...</p>}
+                {paymentMethods.status === 'error' && <p className="dashboard-checkout-error" role="alert">{paymentMethods.error}</p>}
+                {paymentMethods.status === 'ready' && (() => {
+                  const methodId = (method) => `${method.payment_type}:${method.bank_code || ''}`
+                  const vaMethods = paymentMethods.items.filter((method) => method.payment_type === 'va' && method.bank_code !== 'BJB' && method.bank_code !== 'SMBC' && method.bank_code !== 'DBS')
+                  const qrisMethod = paymentMethods.items.find((method) => method.payment_type === 'qris')
+                  return (
+                    <>
+                      {(vaMethods.length > 0 || qrisMethod) && (
+                        <>
+                          <p className="dashboard-payment-group">Virtual Account</p>
+                          <div className="dashboard-bank-grid" role="radiogroup" aria-label="Virtual Account">
+                            {vaMethods.map((method) => (
+                              <button type="button" role="radio" aria-checked={invoicePayMethod === methodId(method)} aria-label={`Virtual Account ${method.display_name}`} title={method.display_name} className={`dashboard-bank-option${invoicePayMethod === methodId(method) ? ' is-active' : ''}`} key={methodId(method)} onClick={() => { setInvoicePayMethod(methodId(method)); setInvoicePayError('') }}>
+                                {typeof method.logo_url === 'string' && method.logo_url.startsWith('https://')
+                                  ? <img src={method.logo_url} alt="" loading="lazy" />
+                                  : <span>{method.bank_code}</span>}
+                              </button>
+                            ))}
+                            {qrisMethod && (
+                              <button type="button" role="radio" aria-checked={invoicePayMethod === methodId(qrisMethod)} aria-label="QRIS Komerce" title="QRIS Komerce" className={`dashboard-bank-option dashboard-bank-qris${invoicePayMethod === methodId(qrisMethod) ? ' is-active' : ''}`} onClick={() => { setInvoicePayMethod(methodId(qrisMethod)); setInvoicePayError('') }}>
+                                <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                                <span>Komerce</span>
+                              </button>
+                            )}
+                            <button type="button" role="radio" aria-checked={invoicePayMethod === 'gopay:'} aria-label="QRIS GoPay" title="QRIS GoPay" className={`dashboard-bank-option dashboard-bank-qris${invoicePayMethod === 'gopay:' ? ' is-active' : ''}`} onClick={() => { setInvoicePayMethod('gopay:'); setInvoicePayError('') }}>
+                              <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                              <span>GoPay</span>
+                            </button>
+                            <button type="button" className="dashboard-bank-option dashboard-bank-balance" aria-label="Bayar dengan saldo" title="Bayar dengan saldo" onClick={() => { setBalancePayPassword(''); setBalancePayError(''); setBalancePayOpen(true) }}>
+                              <Wallet size={22} />
+                              <span>Saldo</span>
+                            </button>
+                          </div>
+                          <p className="dashboard-fee-note">* Biaya transaksi virtual account Rp 4.440,-</p>
+                          <p className="dashboard-fee-note">* Biaya transaksi QRIS Komerce 0,7% + 0,29%.</p>
+                          <p className="dashboard-fee-note">* QRIS GoPay tanpa biaya tambahan; nominal akhir mendapat kode unik.</p>
+                        </>
+                      )}
+                    </>
+                  )
+                })()}
+                {invoicePayError && <p className="dashboard-checkout-error" role="alert">{invoicePayError}</p>}
+              </div>
+              <div className="dashboard-modal-footer">
+                <button className="dashboard-outline-action" type="button" disabled={isPayingInvoice} onClick={() => { setInvoicePayModal(null); setBalancePayOpen(false); setInvoicePayMethod(''); setInvoicePayError('') }}>Batal</button>
+                <button className="dashboard-primary-action" type="button" disabled={isPayingInvoice || isBalancePayBusy || !invoicePayMethod || paymentMethods.status !== 'ready'} onClick={handlePayInvoice}>
+                  {isPayingInvoice ? 'Memproses...' : <><CreditCard size={15} /> Bayar sekarang</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {balancePayOpen && invoicePayModal && (
+          <div
+            className="dashboard-modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => { if (event.target === event.currentTarget && !isBalancePayBusy) { setBalancePayOpen(false); setBalancePayError('') } }}
+          >
+            <div className="dashboard-modal" role="dialog" aria-modal="true" aria-labelledby="balance-pay-modal-title" onKeyDown={(event) => { if (event.key === 'Escape' && !isBalancePayBusy) { setBalancePayOpen(false); setBalancePayError('') } }}>
+              <div className="dashboard-modal-header">
+                <h3 id="balance-pay-modal-title">Bayar dengan saldo</h3>
+                <button type="button" onClick={() => { if (!isBalancePayBusy) { setBalancePayOpen(false); setBalancePayError('') } }} aria-label="Tutup" disabled={isBalancePayBusy}><X size={18} /></button>
+              </div>
+              <div className="dashboard-modal-body">
+                <p className="dashboard-powered-by">
+                  Tagihan {invoicePayModal.number || `#${invoicePayModal.id}`}: <strong style={{ fontSize: '1.35rem' }}>{invoicePayModal.total === null || invoicePayModal.total === undefined ? '-' : formatFullPrice(invoicePayModal.total, invoicePayModal.currency || 'IDR')}</strong>
+                </p>
+                <p className="dashboard-powered-by">
+                  Saldo tersedia: <strong>{wallet.status === 'loaded' ? formatFullPrice(wallet.balance, wallet.currency) : 'Memuat…'}</strong>
+                </p>
+                <label className="dashboard-profile-field dashboard-profile-field-wide">
+                  <span>Password akun <b>*</b></span>
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    placeholder="Konfirmasi password"
+                    value={balancePayPassword}
+                    onChange={(event) => { setBalancePayPassword(event.target.value); setBalancePayError('') }}
+                  />
+                </label>
+                {balancePayError && <p className="dashboard-checkout-error" role="alert">{balancePayError}</p>}
+              </div>
+              <div className="dashboard-modal-footer">
+                <button className="dashboard-outline-action" type="button" disabled={isBalancePayBusy} onClick={() => { setBalancePayOpen(false); setBalancePayError('') }}>Batal</button>
+                <button className="dashboard-primary-action" type="button" disabled={isBalancePayBusy || !balancePayPassword || wallet.status !== 'loaded'} onClick={handlePayWithBalance}>
+                  {isBalancePayBusy ? 'Memproses...' : <><Wallet size={15} /> Bayar dengan saldo</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {checkoutBalanceOpen && (
+          <div
+            className="dashboard-modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => { if (event.target === event.currentTarget && !isCheckoutBalanceBusy) { setCheckoutBalanceOpen(false); setCheckoutBalanceError('') } }}
+          >
+            <div className="dashboard-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-balance-modal-title" onKeyDown={(event) => { if (event.key === 'Escape' && !isCheckoutBalanceBusy) { setCheckoutBalanceOpen(false); setCheckoutBalanceError('') } }}>
+              <div className="dashboard-modal-header">
+                <h3 id="checkout-balance-modal-title">Bayar dengan saldo</h3>
+                <button type="button" onClick={() => { if (!isCheckoutBalanceBusy) { setCheckoutBalanceOpen(false); setCheckoutBalanceError('') } }} aria-label="Tutup" disabled={isCheckoutBalanceBusy}><X size={18} /></button>
+              </div>
+              <div className="dashboard-modal-body">
+                <p className="dashboard-powered-by">
+                  Total pembayaran: <strong style={{ fontSize: '1.35rem' }}>{formatFullPrice(cart.total, cart.currency)}</strong>
+                </p>
+                <p className="dashboard-powered-by">
+                  Saldo tersedia: <strong>{wallet.status === 'loaded' ? formatFullPrice(wallet.balance, wallet.currency) : 'Memuat…'}</strong>
+                </p>
+                <label className="dashboard-profile-field dashboard-profile-field-wide">
+                  <span>Password akun <b>*</b></span>
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    placeholder="Konfirmasi password"
+                    value={checkoutBalancePassword}
+                    onChange={(event) => { setCheckoutBalancePassword(event.target.value); setCheckoutBalanceError('') }}
+                  />
+                </label>
+                {checkoutBalanceError && <p className="dashboard-checkout-error" role="alert">{checkoutBalanceError}</p>}
+              </div>
+              <div className="dashboard-modal-footer">
+                <button className="dashboard-outline-action" type="button" disabled={isCheckoutBalanceBusy} onClick={() => { setCheckoutBalanceOpen(false); setCheckoutBalanceError('') }}>Batal</button>
+                <button className="dashboard-primary-action" type="button" disabled={isCheckoutBalanceBusy || !checkoutBalancePassword || wallet.status !== 'loaded' || cart.items.length === 0} onClick={handleCheckoutBalance}>
+                  {isCheckoutBalanceBusy ? 'Memproses...' : <><Wallet size={15} /> Bayar dengan saldo</>}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {topupOpen && (
+          <div
+            className="dashboard-modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => { if (event.target === event.currentTarget && !isTopupBusy) { setTopupOpen(false); setTopupError('') } }}
+          >
+            <div className="dashboard-modal" role="dialog" aria-modal="true" aria-labelledby="topup-modal-title" onKeyDown={(event) => { if (event.key === 'Escape' && !isTopupBusy) { setTopupOpen(false); setTopupError('') } }}>
+              <div className="dashboard-modal-header">
+                <h3 id="topup-modal-title">Tambah saldo</h3>
+                <button type="button" onClick={() => { if (!isTopupBusy) { setTopupOpen(false); setTopupError('') } }} aria-label="Tutup" disabled={isTopupBusy}><X size={18} /></button>
+              </div>
+              <div className="dashboard-modal-body">
+                <label className="dashboard-profile-field dashboard-profile-field-wide">
+                  <span>Nominal <b>*</b></span>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="contoh: 50000"
+                    value={topupAmount}
+                    onChange={(event) => { setTopupAmount(event.target.value.replace(/[^0-9]/g, '')); setTopupError('') }}
+                    maxLength={12}
+                  />
+                  <small>Minimal Rp 10.000, maksimal Rp 100.000.000 per transaksi.</small>
+                </label>
+                {Number(topupAmount) > 0 && <p className="dashboard-powered-by">Total: <strong>{formatFullPrice(Number(topupAmount), 'IDR')}</strong></p>}
+                {paymentMethods.status === 'loading' && <p className="dashboard-powered-by">Memuat metode pembayaran...</p>}
+                {paymentMethods.status === 'error' && <p className="dashboard-checkout-error" role="alert">{paymentMethods.error}</p>}
+                {paymentMethods.status === 'ready' && (() => {
+                  const methodId = (method) => `${method.payment_type}:${method.bank_code || ''}`
+                  const vaMethods = paymentMethods.items.filter((method) => method.payment_type === 'va' && method.bank_code !== 'BJB' && method.bank_code !== 'SMBC' && method.bank_code !== 'DBS')
+                  const qrisMethod = paymentMethods.items.find((method) => method.payment_type === 'qris')
+                  return (
+                    <>
+                      {(vaMethods.length > 0 || qrisMethod) && (
+                        <>
+                          <p className="dashboard-payment-group">Virtual Account</p>
+                          <div className="dashboard-bank-grid" role="radiogroup" aria-label="Virtual Account">
+                            {vaMethods.map((method) => (
+                              <button type="button" role="radio" aria-checked={topupMethod === methodId(method)} aria-label={`Virtual Account ${method.display_name}`} title={method.display_name} className={`dashboard-bank-option${topupMethod === methodId(method) ? ' is-active' : ''}`} key={methodId(method)} onClick={() => { setTopupMethod(methodId(method)); setTopupError('') }}>
+                                {typeof method.logo_url === 'string' && method.logo_url.startsWith('https://')
+                                  ? <img src={method.logo_url} alt="" loading="lazy" />
+                                  : <span>{method.bank_code}</span>}
+                              </button>
+                            ))}
+                            {qrisMethod && (
+                              <button type="button" role="radio" aria-checked={topupMethod === methodId(qrisMethod)} aria-label="QRIS Komerce" title="QRIS Komerce" className={`dashboard-bank-option dashboard-bank-qris${topupMethod === methodId(qrisMethod) ? ' is-active' : ''}`} onClick={() => { setTopupMethod(methodId(qrisMethod)); setTopupError('') }}>
+                                <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                                <span>Komerce</span>
+                              </button>
+                            )}
+                            <button type="button" role="radio" aria-checked={topupMethod === 'gopay:'} aria-label="QRIS GoPay" title="QRIS GoPay" className={`dashboard-bank-option dashboard-bank-qris${topupMethod === 'gopay:' ? ' is-active' : ''}`} onClick={() => { setTopupMethod('gopay:'); setTopupError('') }}>
+                              <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
+                              <span>GoPay</span>
+                            </button>
+                          </div>
+                          <p className="dashboard-fee-note">* Biaya transaksi virtual account Rp 4.440,-</p>
+                          <p className="dashboard-fee-note">* Biaya transaksi QRIS Komerce 0,7% + 0,29%.</p>
+                          <p className="dashboard-fee-note">* QRIS GoPay tanpa biaya tambahan; nominal akhir mendapat kode unik.</p>
+                        </>
+                      )}
+                    </>
+                  )
+                })()}
+                {topupError && <p className="dashboard-checkout-error" role="alert">{topupError}</p>}
+              </div>
+              <div className="dashboard-modal-footer">
+                <button className="dashboard-outline-action" type="button" disabled={isTopupBusy} onClick={() => { setTopupOpen(false); setTopupError('') }}>Batal</button>
+                <button className="dashboard-primary-action" type="button" disabled={isTopupBusy || !topupMethod || paymentMethods.status !== 'ready' || Number(topupAmount) < 10000} onClick={handleTopup}>
+                  {isTopupBusy ? 'Memproses...' : <><CreditCard size={15} /> Lanjut bayar</>}
+                </button>
+              </div>
+            </div>
           </div>
         )}
         {notice && (

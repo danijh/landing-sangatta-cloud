@@ -178,6 +178,12 @@ dari `public/api/fossbilling-auth.php` dengan `action=cart`, `cart-add`, dan
 `cart-remove`). `/api/admin/cart/get_list` tidak dipakai karena mengembalikan
 keranjang semua pengunjung tanpa pemilik.
 
+Produk yang sama dengan periode berbeda (misalnya Bulanan lalu Tahunan) saling
+menggantikan. `action=cart-add` membalas 409 berisi `conflict` bila produk itu
+sudah ada dengan periode lain; dashboard menampilkan konfirmasi, lalu mengirim
+ulang dengan `replace: true` sehingga item lama dihapus lebih dulu. Produk
+berbeda tidak terpengaruh.
+
 Halaman checkout memuat metode pembayaran dari Komerce (`action=payment-methods`).
 Tombol Checkout memvalidasi metode yang dipilih, menjalankan `client/cart/checkout`
 dengan gateway `Komerce`, lalu membuat pembayaran Virtual Account lewat
@@ -186,7 +192,25 @@ dan menampilkan status dari `GET /api/v1/user/payment/status/{payment_id}`
 (`action=payment-status`). Server API membutuhkan env `KOMERCE_API_KEY`
 (opsional `KOMERCE_BASE_URL`, default sandbox) dan, agar callback aktif,
 `FOSSBILLING_PUBLIC_URL` (HTTPS publik). Pelanggan wajib mengisi nomor telepon
-di Profil. QRIS belum diproses. Jangan commit API key.
+di Profil. Jangan commit API key.
+
+Pembayaran QRIS memakai QRISLY: `POST /api/v1/qrisly/generate-qris` (env
+`KOMERCE_QRIS_ID`, default `1438`; `unique_amount: true`, nominal = total invoice
++ biaya QRIS 0,7% + 0,29%) lalu `GET /api/v1/qrisly/payment-status/{history_id}`.
+ID pembayaran dipakai dengan awalan `QRISLY-`. QRISLY tidak punya webhook, jadi
+saat status PAID terlihat di `action=payment-status`, server memicu `ipn.php`
+FossBilling (ditandatangani HMAC dengan `KOMERCE_API_KEY`); adapter memverifikasi
+ulang ke Komerce dan menerima QRIS bila nominal ≥ 99,9% dari total invoice.
+
+Ada metode QRIS kedua lewat gateway GoPay milik sendiri (default
+`GOPAY_GATEWAY_URL=http://localhost:3000`, header `X-Api-Key` dari
+`GOPAY_API_KEY`): `POST /create-qris?amount=…&unique_code=true`, status dari
+`GET /check-payment?qris_id=…`, dan ID pembayaran berawalan `GOPAY-`. Gateway
+tidak punya API pembatalan, jadi pembatalan hanya menutup invoice FossBilling.
+Adapter memverifikasi ke gateway memakai `gopay_url` dan `gopay_api_key` pada
+config gateway, lalu menerima pembayaran bila nominal ≥ 99,9% total invoice.
+QRIS GoPay tidak dikenakan biaya transaksi di UI; nominal akhirnya mendapat
+kode unik dari gateway.
 
 Alamat dasar server FossBilling diatur melalui `FOSSBILLING_BASE_URL` (tanpa
 path `/api/...`), dengan default `http://localhost:8086`. Karena itu, saat
@@ -231,7 +255,22 @@ Saat menu Layanan dibuka, backend mengambil `/api/client/order/get_list`
 dengan sesi FossBilling dan hanya mengembalikan ID, judul, status, periode,
 mata uang, harga, serta tanggal kedaluwarsa yang dipakai tabel. Tabel
 menampilkan maksimal tujuh order per halaman dan meringkas harga berdasarkan
-mata uang dan unit periodenya.
+mata uang dan unit periodenya. Status pada tabel ini adalah status layanan dari
+order (`active`, `pending_setup`, `suspended`, `canceled`, dan seterusnya).
+
+Saat menu Tagihan dibuka, backend mengambil `/api/client/invoice/get_list`
+dengan sesi FossBilling yang sama (`action=invoices`) dan hanya mengembalikan
+nomor tagihan (`serie_nr`), status (`unpaid`, `paid`, `refunded`, `canceled`),
+mata uang, total, tanggal tagihan, tanggal jatuh tempo, tanggal bayar, serta
+judul baris invoice. Tab filter memetakan status tersebut ke label
+"Menunggu", "Lunas", "Dikembalikan", dan "Dibatalkan". Tagihan `unpaid` yang
+sudah melewati `due_at` tetap di tab "Menunggu" tetapi ditandai dengan warna
+status netral, dan tombol aksinya menjelaskan bahwa pembayaran langsung dari
+dashboard belum tersedia. Jumlah tagihan `unpaid` juga ditampilkan sebagai lencana
+di menu Tagihan. Panel "Tagihan terbaru" pada Ringkasan memakai tiga tagihan
+terbaru dari data yang sama; bila pemuatan gagal, panel itu memakai data contoh.
+Bila endpoint invoice gagal, halaman Tagihan menampilkan pesan error dan tombol
+coba lagi, bukan data contoh.
 
 Ganti password mengirim `current_password`, `new_password`, dan
 `confirm_password` ke action lokal
