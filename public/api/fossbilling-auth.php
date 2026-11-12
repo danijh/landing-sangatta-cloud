@@ -654,6 +654,33 @@ function payFossBillingInvoiceWithCredits(int $invoiceId): bool
     return is_array($json) && ($json['result'] ?? null) === true && empty($json['error']);
 }
 
+function callFossBillingAdmin(string $action, array $payload): array
+{
+    $token = trim((string) getenv('FOSSBILLING_ADMIN_TOKEN'));
+    if ($token === '' || !function_exists('curl_init')) {
+        return [];
+    }
+    $baseUrl = rtrim(trim(getenv('FOSSBILLING_BASE_URL') ?: 'http://localhost:8086'), '/');
+    $curl = curl_init($baseUrl . '/api/admin/' . ltrim($action, '/'));
+    if ($curl === false) {
+        return [];
+    }
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 20,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_POST => true,
+        CURLOPT_USERPWD => 'admin:' . $token,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Accept: application/json'],
+        CURLOPT_POSTFIELDS => json_encode($payload),
+    ]);
+    $body = curl_exec($curl);
+    curl_close($curl);
+    $json = is_string($body) ? json_decode($body, true) : null;
+
+    return is_array($json) ? $json : [];
+}
+
 const QRISLY_PREFIX = 'QRISLY-';
 const GOPAY_PREFIX = 'GOPAY-';
 
@@ -1070,6 +1097,742 @@ function parsePaymentMethod(string $method): array
     return [$methodType, $bankCode, $isGopay, $isQris, $isVa];
 }
 
+function currentFossClientId(): int
+{
+    $id = $_SESSION['fossbilling_client']['id'] ?? null;
+
+    return is_scalar($id) ? (int) $id : 0;
+}
+
+function nextcloudConfig(): array
+{
+    static $config = null;
+    if ($config === null) {
+        $file = dirname(__DIR__, 2) . '/storage/nextcloud.php';
+        $config = is_file($file) ? (array) include $file : [];
+        $config += [
+            'url' => 'https://nextcloud.local',
+            'admin_user' => 'admin',
+            'admin_app_password' => '',
+            'verify_tls' => true,
+            'product_groups' => [],
+            'products' => [],
+        ];
+    }
+
+    return $config;
+}
+
+function fossProductConfigs(): array
+{
+    static $cache = null;
+    if ($cache !== null) {
+        return $cache;
+    }
+    $cache = [];
+    $token = trim((string) getenv('FOSSBILLING_ADMIN_TOKEN'));
+    if ($token === '' || !function_exists('curl_init')) {
+        return $cache;
+    }
+    $baseUrl = rtrim(trim(getenv('FOSSBILLING_BASE_URL') ?: 'http://localhost:8086'), '/');
+    $curl = curl_init($baseUrl . '/api/admin/product/get_list');
+    if ($curl === false) {
+        return $cache;
+    }
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 8,
+        CURLOPT_CONNECTTIMEOUT => 3,
+        CURLOPT_POST => true,
+        CURLOPT_USERPWD => 'admin:' . $token,
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Accept: application/json'],
+        CURLOPT_POSTFIELDS => json_encode(['per_page' => 100]),
+    ]);
+    $body = curl_exec($curl);
+    curl_close($curl);
+    $json = is_string($body) ? json_decode($body, true) : null;
+    $list = $json['result']['list'] ?? null;
+    if (!is_array($list)) {
+        return $cache;
+    }
+    foreach ($list as $product) {
+        if (!is_array($product) || !isset($product['id'])) {
+            continue;
+        }
+        $cache[(string) $product['id']] = $product;
+    }
+
+    return $cache;
+}
+
+function storageProductInfo(array $order): ?array
+{
+    $productId = isset($order['product_id']) ? (string) $order['product_id'] : null;
+
+    // Sumber utama: config produk di FossBilling admin API.
+    // Field yang dikenali di product.config:
+    //   storage            — kuota, mis. "100 GB" (wajib untuk produk storage)
+    //   storage_group      — grup Nextcloud (default: slug produk)
+    //   storage_bucket     — prefix bucket S3 (default: slug produk)
+    //   storage_mount      — nama mount/folder (default: judul produk)
+    //   storage_grace_hours— grace period setelah expired (default: 720)
+    if ($productId !== null) {
+        $fbProduct = fossProductConfigs()[$productId] ?? null;
+        if (is_array($fbProduct)) {
+            $fbConfig = is_array($fbProduct['config'] ?? null) ? $fbProduct['config'] : [];
+            $quota = $fbConfig['storage'] ?? null;
+            if ((is_string($quota) || is_int($quota) || is_float($quota)) && trim((string) $quota) !== '') {
+                $slug = trim((string) ($fbProduct['slug'] ?? ''));
+                $title = trim((string) ($fbProduct['title'] ?? ''));
+                $group = isset($fbConfig['storage_group']) && trim((string) $fbConfig['storage_group']) !== ''
+                    ? trim((string) $fbConfig['storage_group']) : $slug;
+                $bucket = isset($fbConfig['storage_bucket']) && trim((string) $fbConfig['storage_bucket']) !== ''
+                    ? trim((string) $fbConfig['storage_bucket']) : $slug;
+                $mount = isset($fbConfig['storage_mount']) && trim((string) $fbConfig['storage_mount']) !== ''
+                    ? trim((string) $fbConfig['storage_mount']) : $title;
+                if ($group !== '' && $bucket !== '' && $mount !== '') {
+                    $info = [
+                        'group' => $group,
+                        'bucket' => $bucket,
+                        'mount' => $mount,
+                        'quota' => trim((string) $quota),
+                    ];
+                    if (isset($fbConfig['storage_grace_hours'])
+                        && is_numeric($fbConfig['storage_grace_hours'])) {
+                        $info['grace_hours'] = (float) $fbConfig['storage_grace_hours'];
+                    }
+                    $info['quota_bytes'] = storageQuotaBytes($info['quota']);
+                    return $info;
+                }
+            }
+        }
+    }
+
+    // Fallback: map manual di storage/nextcloud.php.
+    $products = nextcloudConfig()['products'];
+    if (!is_array($products) || $products === []) {
+        return null;
+    }
+
+    $title = isset($order['title']) && is_string($order['title'])
+        ? mb_strtolower(trim($order['title']))
+        : null;
+
+    foreach ($products as $key => $info) {
+        if (!is_array($info)) {
+            continue;
+        }
+        $normalizedKey = is_int($key)
+            ? (string) $key
+            : mb_strtolower(trim((string) $key));
+        if (($productId !== null && $normalizedKey === $productId)
+            || ($title !== null && $normalizedKey === $title)) {
+            $info['quota_bytes'] = storageQuotaBytes($info['quota'] ?? null);
+            return $info;
+        }
+    }
+
+    return null;
+}
+
+function storageQuotaBytes($quota): int
+{
+    if (!is_string($quota) && !is_int($quota) && !is_float($quota)) {
+        return 0;
+    }
+    if (preg_match('/^\s*(\d+(?:\.\d+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)?\s*$/i', (string) $quota, $m) !== 1) {
+        return 0;
+    }
+    $unit = strtolower($m[2] ?? 'b');
+    $factor = match ($unit) {
+        'tb', 'tib' => 1099511627776,
+        'gb', 'gib' => 1073741824,
+        'mb', 'mib' => 1048576,
+        'kb', 'kib' => 1024,
+        default => 1,
+    };
+
+    return (int) round(((float) $m[1]) * $factor);
+}
+
+
+function nextcloudOcs(string $method, string $path, ?string $query = null): array
+{
+    $config = nextcloudConfig();
+    $password = trim((string) $config['admin_app_password']);
+    if ($password === '') {
+        throw new DomainException('Nextcloud admin belum dikonfigurasi (NEXTCLOUD_ADMIN_APP_PASSWORD).', 503);
+    }
+    if (!function_exists('curl_init')) {
+        throw new RuntimeException('The PHP cURL extension is unavailable.');
+    }
+
+    $verifyTls = (bool) $config['verify_tls'];
+    $isRead = in_array(strtoupper($method), ['GET', 'HEAD'], true);
+    $url = rtrim((string) $config['url'], '/') . '/ocs/v1.php/' . ltrim($path, '/') . '?format=json';
+    if ($isRead && $query !== null && $query !== '') {
+        $url .= '&' . ltrim($query, '&');
+    }
+
+    $curl = curl_init($url);
+    if ($curl === false) {
+        throw new RuntimeException('Unable to initialize Nextcloud request.');
+    }
+    curl_setopt_array($curl, [
+        CURLOPT_CONNECTTIMEOUT => 4,
+        CURLOPT_TIMEOUT => 10,
+        CURLOPT_CUSTOMREQUEST => strtoupper($method),
+        CURLOPT_USERPWD => $config['admin_user'] . ':' . $password,
+        CURLOPT_HTTPHEADER => ['OCS-APIRequest: true', 'Accept: application/json'],
+        CURLOPT_SSL_VERIFYPEER => $verifyTls,
+        CURLOPT_SSL_VERIFYHOST => $verifyTls ? 2 : 0,
+        CURLOPT_RETURNTRANSFER => true,
+    ]);
+    if (!$isRead && $query !== null) {
+        curl_setopt($curl, CURLOPT_POSTFIELDS, $query);
+    }
+
+    $raw = curl_exec($curl);
+    $status = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+    $curlError = curl_error($curl);
+    curl_close($curl);
+
+    if ($raw === false) {
+        throw new RuntimeException('Nextcloud tidak dapat dihubungi: ' . $curlError);
+    }
+    $data = json_decode((string) $raw, true);
+    if (!is_array($data) || !isset($data['ocs']['data'])) {
+        throw new RuntimeException('Nextcloud API error (HTTP ' . $status . ').');
+    }
+    $meta = is_array($data['ocs']['meta'] ?? null) ? $data['ocs']['meta'] : [];
+    if ((int) ($meta['statuscode'] ?? 200) >= 400) {
+        throw new RuntimeException('Nextcloud API: ' . (string) ($meta['message'] ?? 'request gagal'));
+    }
+
+    return $data['ocs']['data'];
+}
+
+function nextcloudSyncClientStorage(array $activeOrders, ?int $clientId = null): array
+{
+    $clientId = $clientId ?? currentFossClientId();
+    if ($clientId <= 0) {
+        return ['configured' => false, 'groups' => [], 'quota' => null];
+    }
+    $config = nextcloudConfig();
+    $managedGroups = array_values(array_filter(array_map('strval', (array) ($config['product_groups'] ?? []))));
+    // Sertakan grup dari produk storage di FossBilling agar produk baru
+    // langsung dikelola tanpa update file config.
+    foreach (fossProductConfigs() as $fbProduct) {
+        if (!is_array($fbProduct)) {
+            continue;
+        }
+        $fbConfig = is_array($fbProduct['config'] ?? null) ? $fbProduct['config'] : [];
+        $quota = $fbConfig['storage'] ?? null;
+        if (!is_scalar($quota) || trim((string) $quota) === '') {
+            continue;
+        }
+        $group = isset($fbConfig['storage_group']) && trim((string) $fbConfig['storage_group']) !== ''
+            ? trim((string) $fbConfig['storage_group'])
+            : trim((string) ($fbProduct['slug'] ?? ''));
+        if ($group !== '') {
+            $managedGroups[] = $group;
+        }
+    }
+    $managedGroups = array_values(array_unique($managedGroups));
+    $ncUser = 'fb_' . $clientId;
+
+    $desiredGroups = [];
+    $matched = false;
+    foreach ($activeOrders as $order) {
+        $info = storageProductInfo($order);
+        if ($info === null) {
+            continue;
+        }
+        $matched = true;
+        if (is_string($info['group'] ?? null) && $info['group'] !== '') {
+            $desiredGroups[] = $info['group'];
+        }
+    }
+    $desiredGroups = array_values(array_unique($desiredGroups));
+
+    // Nextcloud 35 mewajibkan password confirmation untuk mengubah grup/kuota
+    // via Provisioning API, jadi mutasi dilakukan script provisioning lewat
+    // occ (jalan sebagai www-data). Di sini kita hanya menghitung state
+    // keinginan lalu menuliskannya ke spec.
+    $homeQuota = trim((string) ($config['home_quota'] ?? '0 B'));
+    if ($homeQuota === '') {
+        $homeQuota = '0 B';
+    }
+
+    $user = null;
+    try {
+        $user = nextcloudOcs('GET', 'cloud/users/' . rawurlencode($ncUser));
+    } catch (Throwable $error) {
+        error_log('Nextcloud user info error ' . $ncUser . ': ' . $error->getMessage());
+    }
+    $currentGroups = is_array($user) ? array_values(array_map('strval', (array) ($user['groups'] ?? []))) : [];
+    $kept = array_values(array_diff($currentGroups, $managedGroups));
+    $newGroups = array_values(array_unique(array_merge($kept, array_intersect($desiredGroups, $managedGroups))));
+
+    $specFile = dirname(__DIR__, 2) . '/storage/nextcloud-mounts.json';
+    $spec = is_file($specFile) ? json_decode((string) @file_get_contents($specFile), true) : null;
+    if (is_array($spec)) {
+        if (!is_array($spec['users'][$ncUser] ?? null)) {
+            $spec['users'][$ncUser] = [
+                'mounts' => [],
+                'retained_buckets' => [],
+                'decommission_buckets' => [],
+            ];
+        }
+        $spec['users'][$ncUser]['groups'] = $desiredGroups;
+        $spec['users'][$ncUser]['home_quota'] = $homeQuota;
+        $spec['managed_groups'] = $managedGroups;
+        $tmp = $specFile . '.tmp';
+        $payload = json_encode($spec, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if (@file_put_contents($tmp, $payload, LOCK_EX) !== false) {
+            @rename($tmp, $specFile);
+        }
+    }
+
+    return [
+        'configured' => $matched || trim((string) nextcloudConfig()['admin_app_password']) !== '',
+        'groups' => $newGroups,
+        'quota' => is_array($user['quota'] ?? null) ? $user['quota'] : null,
+    ];
+}
+
+function writeNextcloudMountSpec(array $orders, ?int $clientId = null): void
+{
+    $clientId = $clientId ?? currentFossClientId();
+    if ($clientId <= 0) {
+        return;
+    }
+    $ncUser = 'fb_' . $clientId;
+    $now = time();
+    $startOfToday = strtotime('today');
+
+    // bucket => state: mount (aktif) > retained (grace) > decommission
+    $mounts = [];
+    $retained = [];
+    $decommission = [];
+    foreach ($orders as $order) {
+        $info = storageProductInfo($order);
+        if ($info === null || !is_string($info['group'] ?? null) || $info['group'] === '') {
+            continue;
+        }
+        $bucketBase = is_string($info['bucket'] ?? null) && $info['bucket'] !== '' ? $info['bucket'] : $info['group'];
+        $bucket = $bucketBase . '-' . $clientId;
+
+        $status = strtolower((string) ($order['status'] ?? ''));
+        $expiresAt = $order['expires_at'] ?? null;
+        $expiry = is_string($expiresAt) && $expiresAt !== '' ? strtotime($expiresAt) : null;
+        $isActive = in_array($status, ['active', 'paid'], true)
+            && ($expiry === null || $expiry >= $startOfToday);
+
+        if ($isActive) {
+            $name = is_string($info['mount'] ?? null) && $info['mount'] !== '' ? $info['mount'] : $info['group'];
+            $mounts[$bucket] = [
+                'name' => $name,
+                'group' => $info['group'],
+                'bucket' => $bucket,
+                'credentials_key' => $ncUser,
+                'expires_at' => is_string($expiresAt) ? $expiresAt : null,
+            ];
+            unset($retained[$bucket], $decommission[$bucket]);
+            continue;
+        }
+        if (isset($mounts[$bucket]) || isset($retained[$bucket]) || isset($decommission[$bucket])) {
+            continue;
+        }
+
+        // order non-aktif: tentukan akhir grace period
+        $anchor = $expiry;
+        if ($anchor === null) {
+            $anchorCandidate = $order['canceled_at'] ?? $order['created_at'] ?? null;
+            $anchor = is_string($anchorCandidate) && $anchorCandidate !== '' ? strtotime($anchorCandidate) : $now;
+        }
+        $graceHours = (float) ($info['grace_hours'] ?? 720);
+        if ($anchor + $graceHours * 3600 > $now) {
+            $retained[$bucket] = $bucket;
+        } else {
+            $decommission[$bucket] = $bucket;
+        }
+    }
+
+    $dir = dirname(__DIR__, 2) . '/storage';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0770, true);
+    }
+    $file = $dir . '/nextcloud-mounts.json';
+    $existing = is_file($file) ? json_decode((string) @file_get_contents($file), true) : null;
+    $all = is_array($existing) && is_array($existing['users'] ?? null) ? $existing['users'] : [];
+
+    $entry = array_merge(is_array($all[$ncUser] ?? null) ? $all[$ncUser] : [], [
+        'mounts' => array_values($mounts),
+        'retained_buckets' => array_values($retained),
+        'decommission_buckets' => array_values($decommission),
+    ]);
+    $hadEntry = isset($all[$ncUser]);
+    if ($entry['mounts'] !== [] || $entry['retained_buckets'] !== [] || $entry['decommission_buckets'] !== [] || $hadEntry) {
+        $all[$ncUser] = $entry;
+    } else {
+        unset($all[$ncUser]);
+    }
+    $tmp = $file . '.tmp';
+    // Pertahankan key top-level lain (mis. managed_groups) yang ditulis
+    // nextcloudSyncClientStorage.
+    $payload = json_encode(array_merge(is_array($existing) ? $existing : [], [
+        's3' => is_array(nextcloudConfig()['s3'] ?? null) ? nextcloudConfig()['s3'] : [],
+        'users' => $all,
+    ]), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    if (@file_put_contents($tmp, $payload, LOCK_EX) !== false) {
+        @rename($tmp, $file);
+    }
+}
+
+function clientPaymentsFilePath(int $clientId): string
+{
+    return dirname(__DIR__, 2) . '/storage/payments/' . $clientId . '.json';
+}
+
+function readStoredClientPayments(): array
+{
+    $clientId = currentFossClientId();
+    if ($clientId <= 0) {
+        return [];
+    }
+    $file = clientPaymentsFilePath($clientId);
+    $data = is_file($file) ? json_decode((string) @file_get_contents($file), true) : null;
+    $payments = is_array($data) && is_array($data['payments'] ?? null) ? $data['payments'] : [];
+    $result = [];
+    foreach ($payments as $paymentId => $entry) {
+        if (is_string($paymentId) && is_array($entry)) {
+            $result[$paymentId] = $entry;
+        }
+    }
+
+    return $result;
+}
+
+function writeStoredClientPayment(string $paymentId, array $entry): void
+{
+    $clientId = currentFossClientId();
+    if ($clientId <= 0 || preg_match('#^[A-Za-z0-9._/-]{1,100}$#', $paymentId) !== 1) {
+        return;
+    }
+    if (!is_int($entry['created_at'] ?? null)) {
+        $entry['created_at'] = time();
+    }
+
+    $payments = readStoredClientPayments();
+    // Pangkas entri yang sudah sangat lama — pembayaran gateway tidak berlaku selama itu.
+    $cutoff = time() - 30 * 86400;
+    foreach ($payments as $existingId => $existing) {
+        $created = is_int($existing['created_at'] ?? null) ? $existing['created_at'] : 0;
+        if ($created > 0 && $created < $cutoff) {
+            unset($payments[$existingId]);
+        }
+    }
+    $payments[$paymentId] = $entry;
+
+    $file = clientPaymentsFilePath($clientId);
+    $directory = dirname($file);
+    if (!is_dir($directory) && !mkdir($directory, 0750, true) && !is_dir($directory)) {
+        return;
+    }
+    $json = json_encode(['payments' => $payments], JSON_UNESCAPED_SLASHES);
+    $tmp = $file . '.tmp.' . bin2hex(random_bytes(4));
+    if ($json === false || file_put_contents($tmp, $json, LOCK_EX) === false) {
+        @unlink($tmp);
+        return;
+    }
+    rename($tmp, $file);
+}
+
+// Simpan pembayaran gateway ke sesi DAN ke file akun, supaya status pembayaran
+// (VA/QRIS) tetap bisa dibuka dari browser atau perangkat lain.
+function storeKomercePayment(string $paymentId, array $entry): void
+{
+    $_SESSION['komerce_payments'][$paymentId] = $entry;
+    writeStoredClientPayment($paymentId, $entry);
+}
+
+function hydrateKomercePayment(string $paymentId): void
+{
+    if (isset($_SESSION['komerce_payments'][$paymentId]) && is_array($_SESSION['komerce_payments'][$paymentId])) {
+        return;
+    }
+    $stored = readStoredClientPayments()[$paymentId] ?? null;
+    if (is_array($stored)) {
+        $_SESSION['komerce_payments'][$paymentId] = $stored;
+    }
+}
+
+function mergeStoredClientPayments(): void
+{
+    foreach (readStoredClientPayments() as $paymentId => $entry) {
+        if (!isset($_SESSION['komerce_payments'][$paymentId])) {
+            $_SESSION['komerce_payments'][$paymentId] = $entry;
+        }
+    }
+}
+
+function markKomercePaymentSynced(string $paymentId): void
+{
+    $entry = $_SESSION['komerce_payments'][$paymentId] ?? null;
+    if (!is_array($entry)) {
+        $entry = readStoredClientPayments()[$paymentId] ?? null;
+    }
+    if (!is_array($entry)) {
+        return;
+    }
+    $entry['synced'] = true;
+    storeKomercePayment($paymentId, $entry);
+}
+
+function paymentExpiryTimestamp($value): ?int
+{
+    if (is_int($value)) {
+        return $value;
+    }
+    if (is_string($value) && $value !== '') {
+        if (preg_match('/^\d{9,11}$/', $value) === 1) {
+            return (int) $value;
+        }
+        $time = strtotime($value);
+        return $time === false ? null : $time;
+    }
+
+    return null;
+}
+
+function gatewayPaymentLiveStatus(string $paymentId, array $stored): ?array
+{
+    try {
+        if (str_starts_with($paymentId, GOPAY_PREFIX)) {
+            $query = ['qris_id' => substr($paymentId, strlen(GOPAY_PREFIX))];
+            if (is_string($stored['trx_id'] ?? null) && $stored['trx_id'] !== '') {
+                $query['trx_id'] = $stored['trx_id'];
+            }
+            $data = gopayRequest('GET', '/check-payment', $query);
+            $payment = normalizeGopayStatus($data, $paymentId, null);
+
+            return ['status' => $payment['status'], 'expired_at' => $payment['expired_at'], 'raw' => $data];
+        }
+        if (str_starts_with($paymentId, QRISLY_PREFIX)) {
+            $data = komerceRequest('GET', '/api/v1/qrisly/payment-status/' . rawurlencode(substr($paymentId, strlen(QRISLY_PREFIX))))['data'] ?? null;
+            if (!is_array($data)) {
+                return null;
+            }
+            $payment = normalizeQrislyStatus($data, $paymentId, null);
+            $expiredAt = $data['expiry_time'] ?? $data['expired_at'] ?? null;
+
+            return ['status' => $payment['status'], 'expired_at' => is_string($expiredAt) ? $expiredAt : null, 'raw' => $data];
+        }
+        $data = komerceRequest('GET', '/api/v1/user/payment/status/' . rawurlencode($paymentId))['data'] ?? null;
+        if (!is_array($data)) {
+            return null;
+        }
+        $expiredAt = $data['expired_at'] ?? $data['expired_time'] ?? $data['expiry_time'] ?? null;
+
+        return [
+            'status' => strtoupper((string) ($data['status'] ?? '')),
+            'expired_at' => is_string($expiredAt) || is_int($expiredAt) ? $expiredAt : null,
+            'raw' => $data,
+        ];
+    } catch (Throwable) {
+        return null;
+    }
+}
+
+function qrisStringFromGatewayData(array $data): ?string
+{
+    foreach (['qris_string', 'qr_string', 'qris_code', 'qr_code', 'qris'] as $key) {
+        $value = $data[$key] ?? null;
+        if (is_string($value) && trim($value) !== '') {
+            return $value;
+        }
+    }
+
+    return null;
+}
+
+// Untuk entri lama yang belum menyimpan payload payment, susun ulang payload
+// tampilan dari respons status gateway. Return null bila tidak memungkinkan.
+// $bankCode kosong berarti tidak ada pilihan bank — verifikasi bank dilewati.
+function legacyGatewayPaymentPayload(string $paymentId, array $stored, array $live, string $methodType, string $bankCode): ?array
+{
+    $raw = is_array($live['raw'] ?? null) ? $live['raw'] : [];
+    $orderRef = is_string($stored['order_ref'] ?? null) ? $stored['order_ref'] : null;
+
+    if (str_starts_with($paymentId, GOPAY_PREFIX)) {
+        $qrisString = qrisStringFromGatewayData($raw);
+        if ($qrisString === null) {
+            return null;
+        }
+
+        return [
+            'payment_id' => $paymentId,
+            'payment_type' => 'gopay',
+            'qris_string' => $qrisString,
+            'amount' => $raw['total_amount'] ?? $raw['amount'] ?? null,
+            'expired_at' => $live['expired_at'] ?? null,
+            'status' => 'PENDING',
+            'order_id' => $orderRef,
+        ];
+    }
+    if (str_starts_with($paymentId, QRISLY_PREFIX)) {
+        $qrisString = qrisStringFromGatewayData($raw);
+        if ($qrisString === null) {
+            return null;
+        }
+
+        return [
+            'payment_id' => $paymentId,
+            'payment_type' => 'qris',
+            'qris_string' => $qrisString,
+            'amount' => $raw['amount'] ?? $raw['final_amount'] ?? null,
+            'expired_at' => $live['expired_at'] ?? null,
+            'status' => 'PENDING',
+            'order_id' => $orderRef,
+        ];
+    }
+    // VA Komerce: respons status dipakai apa adanya, tapi bank harus cocok
+    // dengan metode yang dipilih ulang oleh pengguna.
+    $rawBank = $raw['bank_code'] ?? $raw['channel_code'] ?? $raw['bank'] ?? $raw['channel'] ?? $raw['payment_channel'] ?? $raw['va_bank'] ?? null;
+    if ($bankCode !== '' && (!is_string($rawBank) || strtoupper($rawBank) !== strtoupper($bankCode))) {
+        return null;
+    }
+    $payment = $raw;
+    $payment['payment_id'] = $paymentId;
+    $payment['status'] = 'PENDING';
+    if ($live['expired_at'] !== null) {
+        $payment['expired_at'] = $live['expired_at'];
+    }
+
+    return $payment;
+}
+
+// Cari pembayaran gateway yang masih PENDING untuk invoice + metode yang sama
+// (sesi + file akun), supaya tombol Bayar melanjutkan pembayaran lama alih-alih
+// membuat payment_id Komerce baru. Return null bila tidak ada yang masih berlaku.
+function resumeInvoiceGatewayPayment(array $invoice, ?string $method = null): ?array
+{
+    mergeStoredClientPayments();
+    $payments = $_SESSION['komerce_payments'] ?? null;
+    if (!is_array($payments)) {
+        return null;
+    }
+    $invoiceId = (int) $invoice['id'];
+    // $method null = resume pembayaran pending apa pun untuk invoice ini.
+    [$methodType, $bankCode] = $method !== null ? parsePaymentMethod($method) : [null, ''];
+
+    foreach (array_reverse($payments, true) as $paymentId => $stored) {
+        if (!is_string($paymentId) || !is_array($stored)
+            || (int) ($stored['invoice_id'] ?? 0) !== $invoiceId
+            || !empty($stored['synced'])) {
+            continue;
+        }
+
+        $storedMethod = $stored['method'] ?? null;
+        $isLegacy = $storedMethod === null;
+        if ($method !== null && !$isLegacy && $storedMethod !== $method) {
+            continue;
+        }
+        // Tipe/metode kandidat untuk payload legacy & penyimpanan ulang.
+        $candidateType = str_starts_with($paymentId, GOPAY_PREFIX) ? 'gopay'
+            : (str_starts_with($paymentId, QRISLY_PREFIX) ? 'qris' : 'va');
+        $candidateBank = '';
+        if ($method !== null) {
+            if ($isLegacy) {
+                // Entri lama tanpa method: cocokkan lewat prefix payment_id;
+                // untuk VA bank diverifikasi dari respons status gateway.
+                if ($candidateType === 'gopay' && $methodType !== 'gopay') {
+                    continue;
+                }
+                if ($candidateType === 'qris' && $methodType !== 'qris') {
+                    continue;
+                }
+                if ($candidateType === 'va' && $methodType !== 'va') {
+                    continue;
+                }
+                $candidateBank = $bankCode;
+            }
+        }
+
+        $payment = is_array($stored['payment'] ?? null) ? $stored['payment'] : null;
+        if ($payment !== null && !is_string($payment['payment_id'] ?? null)) {
+            $payment = null;
+        }
+
+        // Buang kandidat yang jelas sudah kedaluwarsa sebelum memanggil gateway.
+        if ($payment !== null) {
+            $expired = false;
+            $expiryTime = paymentExpiryTimestamp($payment['expired_at'] ?? null);
+            if ($expiryTime !== null) {
+                $expired = $expiryTime <= time();
+            }
+            if (!$expired && is_int($stored['created_at'] ?? null)
+                && !str_starts_with($paymentId, GOPAY_PREFIX)
+                && !str_starts_with($paymentId, QRISLY_PREFIX)) {
+                // VA Komerce dibuat dengan expiry_duration 86400 detik.
+                $expired = $stored['created_at'] + 86400 <= time();
+            }
+            if ($expired) {
+                continue;
+            }
+        }
+
+        $live = gatewayPaymentLiveStatus($paymentId, $stored);
+        if ($live === null || $live['status'] !== 'PENDING') {
+            continue;
+        }
+        $expiryTime = paymentExpiryTimestamp($live['expired_at'] ?? null);
+        if ($expiryTime !== null && $expiryTime <= time()) {
+            continue;
+        }
+
+        if ($payment === null) {
+            $payment = legacyGatewayPaymentPayload($paymentId, $stored, $live, $candidateType, $candidateBank);
+            if ($payment === null) {
+                continue;
+            }
+        }
+        $payment['status'] = 'PENDING';
+        if ($live['expired_at'] !== null) {
+            $payment['expired_at'] = $live['expired_at'];
+        }
+
+        // Lengkapi entri lama agar berikutnya bisa di-resume dari perangkat lain.
+        if ($isLegacy || !is_int($stored['created_at'] ?? null) || !is_string($stored['method'] ?? null)) {
+            $resolvedMethod = $method;
+            if ($resolvedMethod === null) {
+                if ($candidateType === 'va') {
+                    $payBank = strtoupper((string) ($payment['bank_code'] ?? $payment['channel_code'] ?? $payment['bank'] ?? $payment['channel'] ?? $payment['va_bank'] ?? ''));
+                    $resolvedMethod = $payBank !== '' ? 'va:' . $payBank : null;
+                } else {
+                    $resolvedMethod = $candidateType . ':';
+                }
+            }
+            if ($resolvedMethod !== null) {
+                $stored['method'] = $resolvedMethod;
+            }
+            $stored['created_at'] = is_int($stored['created_at'] ?? null) ? $stored['created_at'] : time();
+            $stored['payment'] = $payment;
+            storeKomercePayment($paymentId, $stored);
+        }
+
+        return [
+            'payment' => $payment,
+            'invoice' => ['id' => $invoiceId, 'total' => (int) round((float) ($invoice['total'] ?? 0))],
+            'error' => null,
+            'resumed' => true,
+        ];
+    }
+
+    return null;
+}
+
 function respondInvoiceGatewayPayment(array $invoice, string $method, array $extra = []): never
 {
     [$methodType, $bankCode, $isGopay, $isQris, $isVa] = parsePaymentMethod($method);
@@ -1137,26 +1900,30 @@ function respondInvoiceGatewayPayment(array $invoice, string $method, array $ext
             throw new RuntimeException('Gateway QRIS GoPay mengembalikan respons yang tidak dikenali.');
         }
         $paymentId = GOPAY_PREFIX . $qris['qris_id'];
-        $_SESSION['komerce_payments'][$paymentId] = [
+        $paymentPayload = [
+            'payment_id' => $paymentId,
+            'payment_type' => 'gopay',
+            'qris_string' => $qris['qris_code'],
+            'amount' => (int) ($qris['total_amount'] ?? $amount),
+            'original_amount' => (int) ($qris['amount'] ?? $amount),
+            'unique_code' => $qris['unique_code'] ?? null,
+            'trx_id' => $qris['trx_id'] ?? null,
+            'expired_at' => $qris['expires_at'] ?? null,
+            'status' => 'PENDING',
+            'order_id' => mb_substr($invoiceNumber, 0, 100),
+        ];
+        storeKomercePayment($paymentId, [
             'invoice_id' => (int) $invoice['id'],
             'order_id' => null,
             'order_ref' => mb_substr($invoiceNumber, 0, 100),
             'gateway_id' => 0,
             'trx_id' => is_string($qris['trx_id'] ?? null) ? $qris['trx_id'] : null,
-        ];
+            'method' => $method,
+            'created_at' => time(),
+            'payment' => $paymentPayload,
+        ]);
         respond([
-            'payment' => [
-                'payment_id' => $paymentId,
-                'payment_type' => 'gopay',
-                'qris_string' => $qris['qris_code'],
-                'amount' => (int) ($qris['total_amount'] ?? $amount),
-                'original_amount' => (int) ($qris['amount'] ?? $amount),
-                'unique_code' => $qris['unique_code'] ?? null,
-                'trx_id' => $qris['trx_id'] ?? null,
-                'expired_at' => $qris['expires_at'] ?? null,
-                'status' => 'PENDING',
-                'order_id' => mb_substr($invoiceNumber, 0, 100),
-            ],
+            'payment' => $paymentPayload,
             'invoice' => ['id' => (int) $invoice['id'], 'total' => $invoiceTotal],
             'error' => null,
         ] + $extra);
@@ -1175,23 +1942,27 @@ function respondInvoiceGatewayPayment(array $invoice, string $method, array $ext
             throw new RuntimeException('Komerce returned an unexpected QRIS response.');
         }
         $paymentId = QRISLY_PREFIX . (int) $qris['history_id'];
-        $_SESSION['komerce_payments'][$paymentId] = [
+        $paymentPayload = [
+            'payment_id' => $paymentId,
+            'payment_type' => 'qris',
+            'qris_string' => $qris['qris_string'],
+            'amount' => (int) ($qris['final_amount'] ?? $amount),
+            'original_amount' => (int) ($qris['original_amount'] ?? $amount),
+            'expired_at' => $qris['expiry_time'] ?? null,
+            'status' => 'PENDING',
+            'order_id' => mb_substr($invoiceNumber, 0, 100),
+        ];
+        storeKomercePayment($paymentId, [
             'invoice_id' => (int) $invoice['id'],
             'order_id' => null,
             'order_ref' => mb_substr($invoiceNumber, 0, 100),
             'gateway_id' => $gatewayId,
-        ];
+            'method' => $method,
+            'created_at' => time(),
+            'payment' => $paymentPayload,
+        ]);
         respond([
-            'payment' => [
-                'payment_id' => $paymentId,
-                'payment_type' => 'qris',
-                'qris_string' => $qris['qris_string'],
-                'amount' => (int) ($qris['final_amount'] ?? $amount),
-                'original_amount' => (int) ($qris['original_amount'] ?? $amount),
-                'expired_at' => $qris['expiry_time'] ?? null,
-                'status' => 'PENDING',
-                'order_id' => mb_substr($invoiceNumber, 0, 100),
-            ],
+            'payment' => $paymentPayload,
             'invoice' => ['id' => (int) $invoice['id'], 'total' => $invoiceTotal],
             'error' => null,
         ] + $extra);
@@ -1252,12 +2023,15 @@ function respondInvoiceGatewayPayment(array $invoice, string $method, array $ext
     if (!is_string($paymentId) || preg_match('#^[A-Za-z0-9._/-]{1,100}$#', $paymentId) !== 1) {
         throw new RuntimeException('Komerce returned an unexpected payment response.');
     }
-    $_SESSION['komerce_payments'][$paymentId] = [
+    storeKomercePayment($paymentId, [
         'invoice_id' => (int) $invoice['id'],
         'order_id' => null,
         'order_ref' => mb_substr($invoiceNumber, 0, 100),
         'gateway_id' => $gatewayId,
-    ];
+        'method' => $method,
+        'created_at' => time(),
+        'payment' => is_array($payment) ? $payment : [],
+    ]);
 
     respond(['payment' => $payment, 'invoice' => ['id' => (int) $invoice['id'], 'total' => $invoiceTotal], 'error' => null] + $extra);
 }
@@ -1321,7 +2095,22 @@ if ($action === 'services' && $_SERVER['REQUEST_METHOD'] === 'GET') {
                         || !is_numeric((string) $order['price'])))
                 || (isset($order['period']) && !is_string($order['period']))
                 || (isset($order['expires_at']) && !is_string($order['expires_at']))
-                || (isset($order['product_id']) && !is_scalar($order['product_id']))) {
+                || (isset($order['product_id']) && !is_scalar($order['product_id']))
+                || (isset($order['activated_at']) && !is_string($order['activated_at']))
+                || (isset($order['created_at']) && !is_string($order['created_at']))
+                || (isset($order['canceled_at']) && !is_string($order['canceled_at']))
+                || (isset($order['reason']) && !is_string($order['reason']))
+                || (isset($order['notes']) && !is_string($order['notes']))
+                || (isset($order['service_type']) && !is_string($order['service_type']))
+                || (isset($order['unpaid_invoice_id']) && !is_scalar($order['unpaid_invoice_id']))
+                || (isset($order['active_tickets'])
+                    && !is_int($order['active_tickets'])
+                    && !(is_string($order['active_tickets']) && ctype_digit($order['active_tickets'])))
+                || (isset($order['total'])
+                    && ((!is_string($order['total'])
+                            && !is_int($order['total'])
+                            && !is_float($order['total']))
+                        || !is_numeric((string) $order['total'])))) {
                 throw new RuntimeException('FossBilling returned an invalid order record.');
             }
 
@@ -1334,10 +2123,39 @@ if ($action === 'services' && $_SERVER['REQUEST_METHOD'] === 'GET') {
                 'period' => $order['period'] ?? null,
                 'expires_at' => $order['expires_at'] ?? null,
                 'product_id' => isset($order['product_id']) ? (string) $order['product_id'] : null,
+                'activated_at' => $order['activated_at'] ?? null,
+                'created_at' => $order['created_at'] ?? null,
+                'canceled_at' => $order['canceled_at'] ?? null,
+                'reason' => $order['reason'] ?? null,
+                'notes' => $order['notes'] ?? null,
+                'service_type' => $order['service_type'] ?? null,
+                'unpaid_invoice_id' => isset($order['unpaid_invoice_id']) ? (string) $order['unpaid_invoice_id'] : null,
+                'active_tickets' => isset($order['active_tickets']) ? (int) $order['active_tickets'] : 0,
+                'total' => $order['total'] ?? null,
+                'storage' => storageProductInfo($order),
             ];
         }
 
-        respond(['orders' => $orders]);
+        $activeForStorage = array_values(array_filter($orders, static function (array $order): bool {
+            if (!in_array($order['status'], ['active', 'paid'], true)) {
+                return false;
+            }
+            $expiresAt = $order['expires_at'] ?? null;
+            return !is_string($expiresAt) || $expiresAt === '' || strtotime($expiresAt) > time();
+        }));
+        try {
+            writeNextcloudMountSpec($orders);
+        } catch (Throwable $error) {
+            error_log('Nextcloud mount spec error: ' . $error->getMessage());
+        }
+        $storageSummary = null;
+        try {
+            $storageSummary = nextcloudSyncClientStorage($activeForStorage);
+        } catch (Throwable $error) {
+            error_log('Nextcloud storage sync error: ' . $error->getMessage());
+        }
+
+        respond(['orders' => $orders, 'storage' => $storageSummary]);
     } catch (DomainException $error) {
         if ($error->getCode() === 401) {
             $_SESSION = [];
@@ -1347,6 +2165,88 @@ if ($action === 'services' && $_SERVER['REQUEST_METHOD'] === 'GET') {
         error_log('FossBilling order API error: ' . $error->getMessage());
         respond(['error' => 'Daftar layanan tidak dapat dimuat dari server akun. Coba lagi nanti.'], 502);
     }
+}
+
+// Refresh storage spec untuk SEMUA client FossBilling — dipakai cron/admin
+// job agar paket expired tetap dicabut tanpa menunggu user login.
+// Akses: GET ?action=storage-refresh&token=<FOSSBILLING_ADMIN_TOKEN>
+// Opsional: &client_id=<id> untuk refresh satu client saja.
+if ($action === 'storage-refresh' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    $adminToken = trim((string) getenv('FOSSBILLING_ADMIN_TOKEN'));
+    // Header diprioritaskan agar token tidak tercatat di access log web server.
+    $givenToken = (string) ($_SERVER['HTTP_X_ADMIN_TOKEN'] ?? $_GET['token'] ?? '');
+    if ($adminToken === '' || $givenToken === '' || !hash_equals($adminToken, $givenToken)) {
+        respond(['error' => 'Token tidak valid.'], 403);
+    }
+
+    $onlyClientId = isset($_GET['client_id']) && ctype_digit((string) $_GET['client_id'])
+        ? (int) $_GET['client_id'] : null;
+
+    // Kumpulkan semua order admin, dikelompokkan per client_id.
+    $ordersByClient = [];
+    $page = 1;
+    $perPage = 100;
+    $maxPages = 100;
+    while ($page <= $maxPages) {
+        $response = callFossBillingAdmin('order/get_list', [
+            'per_page' => $perPage,
+            'page' => $page,
+        ]);
+        $list = $response['result']['list'] ?? null;
+        if (!is_array($list) || $list === []) {
+            break;
+        }
+        foreach ($list as $order) {
+            if (!is_array($order)) {
+                continue;
+            }
+            $cid = $order['client_id'] ?? null;
+            if ($cid === null || !is_numeric($cid)) {
+                continue;
+            }
+            $cid = (int) $cid;
+            if ($onlyClientId !== null && $cid !== $onlyClientId) {
+                continue;
+            }
+            $ordersByClient[$cid][] = $order;
+        }
+        if (count($list) < $perPage) {
+            break;
+        }
+        $page++;
+    }
+
+    $processed = 0;
+    $errors = 0;
+    foreach ($ordersByClient as $cid => $clientOrders) {
+        try {
+            writeNextcloudMountSpec($clientOrders, $cid);
+        } catch (Throwable $error) {
+            $errors++;
+            error_log('storage-refresh spec error client ' . $cid . ': ' . $error->getMessage());
+        }
+        $activeForStorage = array_values(array_filter($clientOrders, static function (array $order): bool {
+            if (!in_array(strtolower((string) ($order['status'] ?? '')), ['active', 'paid'], true)) {
+                return false;
+            }
+            $expiresAt = $order['expires_at'] ?? null;
+            return !is_string($expiresAt) || $expiresAt === '' || strtotime($expiresAt) > time();
+        }));
+        try {
+            nextcloudSyncClientStorage($activeForStorage, $cid);
+        } catch (Throwable $error) {
+            $errors++;
+            error_log('storage-refresh sync error client ' . $cid . ': ' . $error->getMessage());
+        }
+        $processed++;
+    }
+
+    respond([
+        'ok' => true,
+        'clients' => $processed,
+        'errors' => $errors,
+        'orders_seen' => array_sum(array_map('count', $ordersByClient)),
+    ]);
 }
 
 if ($action === 'invoices' && $_SERVER['REQUEST_METHOD'] === 'GET') {
@@ -1557,6 +2457,39 @@ if ($action === 'invoice-pdf' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
+// Cek apakah invoice unpaid ini punya pembayaran gateway yang masih PENDING,
+// supaya frontend bisa langsung ke halaman status tanpa pilih metode dulu.
+if ($action === 'invoice-payment' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (empty($_SESSION['fossbilling_authenticated'])) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+
+    $invoiceId = isset($_GET['id']) && is_string($_GET['id']) ? trim($_GET['id']) : '';
+    if (preg_match('/^[0-9]{1,18}$/', $invoiceId) !== 1) {
+        respond(['error' => 'Nomor tagihan tidak valid.'], 422);
+    }
+
+    try {
+        $invoice = findClientInvoiceById($invoiceId);
+        if (strtolower((string) ($invoice['status'] ?? '')) !== 'unpaid') {
+            respond(['payment' => null, 'error' => 'Tagihan tidak dalam status belum dibayar.'], 422);
+        }
+        $resumed = resumeInvoiceGatewayPayment($invoice);
+        if ($resumed === null) {
+            respond(['payment' => null]);
+        }
+        respond($resumed);
+    } catch (DomainException $error) {
+        if ($error->getCode() === 401) {
+            $_SESSION = [];
+        }
+        respond(['error' => $error->getMessage()], $error->getCode() ?: 422);
+    } catch (Throwable $error) {
+        error_log('FossBilling invoice payment lookup error: ' . $error->getMessage());
+        respond(['error' => 'Status pembayaran tagihan tidak dapat diperiksa. Coba lagi nanti.'], 502);
+    }
+}
+
 if ($action === 'payment-methods' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     if (empty($_SESSION['fossbilling_authenticated'])) {
         respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
@@ -1572,6 +2505,9 @@ if ($action === 'payment-status' && $_SERVER['REQUEST_METHOD'] === 'GET') {
         respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
     }
     $paymentId = $_GET['payment_id'] ?? null;
+    if (is_string($paymentId)) {
+        hydrateKomercePayment($paymentId);
+    }
     if (!is_string($paymentId) || preg_match('#^[A-Za-z0-9._/-]{1,100}$#', $paymentId) !== 1
         || empty($_SESSION['komerce_payments'][$paymentId])) {
         respond(['error' => 'Pembayaran tidak ditemukan.'], 404);
@@ -1590,7 +2526,7 @@ if ($action === 'payment-status' && $_SERVER['REQUEST_METHOD'] === 'GET') {
         if ($payment['status'] === 'PAID' && is_array($stored) && empty($stored['synced'])) {
             $synced = notifyFossBillingPaid($paymentId, (int) ($stored['gateway_id'] ?? 0), (int) ($stored['invoice_id'] ?? 0), $orderId);
             if ($synced) {
-                $_SESSION['komerce_payments'][$paymentId]['synced'] = true;
+                markKomercePaymentSynced($paymentId);
             }
             $payment['invoice_synced'] = $synced;
         }
@@ -1608,7 +2544,7 @@ if ($action === 'payment-status' && $_SERVER['REQUEST_METHOD'] === 'GET') {
         if ($payment['status'] === 'PAID' && is_array($stored) && empty($stored['synced'])) {
             $synced = notifyFossBillingPaid($paymentId, (int) ($stored['gateway_id'] ?? 0), (int) ($stored['invoice_id'] ?? 0), $orderId);
             if ($synced) {
-                $_SESSION['komerce_payments'][$paymentId]['synced'] = true;
+                markKomercePaymentSynced($paymentId);
             }
             $payment['invoice_synced'] = $synced;
         }
@@ -1637,7 +2573,7 @@ if ($action === 'payment-status' && $_SERVER['REQUEST_METHOD'] === 'GET') {
         $synced = $gatewayId > 0
             && notifyFossBillingPaid($paymentId, $gatewayId, (int) ($stored['invoice_id'] ?? 0), $orderId);
         if ($synced) {
-            $_SESSION['komerce_payments'][$paymentId]['synced'] = true;
+            markKomercePaymentSynced($paymentId);
         }
         $payment['invoice_synced'] = $synced;
         session_write_close();
@@ -1797,7 +2733,87 @@ if ($action === 'ticket' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
-if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state', 'cart-add', 'cart-remove', 'checkout', 'checkout-balance', 'pay-invoice', 'wallet-topup', 'pay-invoice-balance', 'payment-cancel'], true)
+if ($action === 'emails' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (empty($_SESSION['fossbilling_authenticated'])) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+
+    try {
+        $response = callFossBillingClient('email/get_list', ['per_page' => 20]);
+        $result = $response['result'] ?? null;
+        if (!is_array($result) || !is_array($result['list'] ?? null)) {
+            throw new RuntimeException('FossBilling returned an invalid email list.');
+        }
+        $text = static fn ($value, int $max = 500): string => is_scalar($value) ? substr((string) $value, 0, $max) : '';
+
+        $emails = [];
+        foreach ($result['list'] as $email) {
+            if (!is_array($email) || !is_scalar($email['id'] ?? null)) {
+                continue;
+            }
+            $emails[] = [
+                'id' => $text($email['id'], 20),
+                'subject' => $text($email['subject'] ?? ''),
+                'sender' => $text($email['sender'] ?? ''),
+                'recipients' => $text($email['recipients'] ?? ''),
+                'created_at' => $text($email['created_at'] ?? '', 40),
+                'has_attachment' => !empty($email['has_attachment']),
+            ];
+        }
+
+        respond(['total' => (int) ($result['total'] ?? count($emails)), 'emails' => $emails]);
+    } catch (DomainException $error) {
+        if ($error->getCode() === 401) {
+            $_SESSION = [];
+        }
+        respond(['error' => $error->getMessage()], $error->getCode() ?: 422);
+    } catch (Throwable $error) {
+        error_log('FossBilling email list error: ' . $error->getMessage());
+        respond(['error' => 'Daftar email tidak dapat dimuat. Coba lagi nanti.'], 502);
+    }
+}
+
+if ($action === 'email' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (empty($_SESSION['fossbilling_authenticated'])) {
+        respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
+    }
+
+    $emailId = $_GET['id'] ?? '';
+    if (!is_string($emailId) || preg_match('/^[0-9]{1,18}$/', $emailId) !== 1) {
+        respond(['error' => 'ID email tidak valid.'], 422);
+    }
+
+    try {
+        $response = callFossBillingClient('email/get', ['id' => (int) $emailId]);
+        $email = $response['result'] ?? null;
+        if (!is_array($email)) {
+            throw new RuntimeException('FossBilling returned an invalid email.');
+        }
+        $text = static fn ($value, int $max = 500): string => is_scalar($value) ? substr((string) $value, 0, $max) : '';
+
+        respond(['email' => [
+            'id' => $text($email['id'] ?? $emailId, 20),
+            'subject' => $text($email['subject'] ?? ''),
+            'sender' => $text($email['sender'] ?? ''),
+            'recipients' => $text($email['recipients'] ?? ''),
+            'content_html' => is_string($email['content_html'] ?? null) ? substr($email['content_html'], 0, 500000) : '',
+            'content_text' => is_string($email['content_text'] ?? null) ? substr($email['content_text'], 0, 100000) : '',
+            'has_attachment' => !empty($email['has_attachment']),
+            'created_at' => $text($email['created_at'] ?? '', 40),
+            'updated_at' => $text($email['updated_at'] ?? '', 40),
+        ]]);
+    } catch (DomainException $error) {
+        if ($error->getCode() === 401) {
+            $_SESSION = [];
+        }
+        respond(['error' => $error->getMessage()], $error->getCode() ?: 422);
+    } catch (Throwable $error) {
+        error_log('FossBilling email detail error: ' . $error->getMessage());
+        respond(['error' => 'Isi email tidak dapat dimuat. Coba lagi nanti.'], 502);
+    }
+}
+
+if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state', 'cart-add', 'cart-remove', 'checkout', 'checkout-balance', 'pay-invoice', 'wallet-topup', 'pay-invoice-balance', 'payment-cancel', 'email-resend', 'email-delete'], true)
     || $_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(['error' => 'Permintaan tidak valid.'], 405);
 }
@@ -1806,7 +2822,7 @@ if (!csrfIsValid()) {
     respond(['error' => 'Sesi kedaluwarsa. Muat ulang halaman lalu coba lagi.'], 403);
 }
 
-if (in_array($action, ['logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state', 'cart-add', 'cart-remove', 'checkout', 'checkout-balance', 'pay-invoice', 'wallet-topup', 'pay-invoice-balance', 'payment-cancel'], true)
+if (in_array($action, ['logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state', 'cart-add', 'cart-remove', 'checkout', 'checkout-balance', 'pay-invoice', 'wallet-topup', 'pay-invoice-balance', 'payment-cancel', 'email-resend', 'email-delete'], true)
     && empty($_SESSION['fossbilling_authenticated'])) {
     respond(['error' => 'Sesi akun tidak valid. Silakan masuk kembali.'], 401);
 }
@@ -1882,12 +2898,14 @@ try {
             respond(['error' => 'Permintaan terlalu besar.'], 413);
         }
         $input = json_decode($rawBody ?: '', true, 16, JSON_THROW_ON_ERROR);
-        if (!is_array($input) || array_diff(array_keys($input), ['support_helpdesk_id', 'subject', 'content']) !== []) {
+        if (!is_array($input) || array_diff(array_keys($input), ['support_helpdesk_id', 'subject', 'content', 'rel_type', 'rel_id']) !== []) {
             respond(['error' => 'Format data tidak valid.'], 400);
         }
         $helpdeskId = $input['support_helpdesk_id'] ?? null;
         $subject = $input['subject'] ?? null;
         $content = $input['content'] ?? null;
+        $relType = $input['rel_type'] ?? null;
+        $relId = $input['rel_id'] ?? null;
         if (!is_string($helpdeskId) || preg_match('/^[0-9]{1,18}$/', $helpdeskId) !== 1) {
             respond(['error' => 'Helpdesk tidak valid.'], 422);
         }
@@ -1897,12 +2915,23 @@ try {
         if (!is_string($content) || trim($content) === '' || strlen($content) > 50000) {
             respond(['error' => 'Pesan wajib diisi.'], 422);
         }
+        if (($relType === null) !== ($relId === null)
+            || ($relType !== null && $relType !== 'order')
+            || ($relId !== null && (!is_string($relId) && !is_int($relId) || preg_match('/^[0-9]{1,18}$/', (string) $relId) !== 1))) {
+            respond(['error' => 'Relasi tiket tidak valid.'], 422);
+        }
 
-        $response = callFossBillingClient('support/ticket_create', [
+        $ticketPayload = [
             'support_helpdesk_id' => (int) $helpdeskId,
             'subject' => trim($subject),
             'content' => $content,
-        ]);
+        ];
+        if ($relType !== null) {
+            // FossBilling memverifikasi rel_id order milik client sesi ini.
+            $ticketPayload['rel_type'] = $relType;
+            $ticketPayload['rel_id'] = (int) $relId;
+        }
+        $response = callFossBillingClient('support/ticket_create', $ticketPayload);
         $ticketId = $response['result'] ?? null;
         if (!is_int($ticketId) && !(is_string($ticketId) && ctype_digit($ticketId))) {
             throw new RuntimeException('FossBilling returned an unexpected ticket response.');
@@ -1969,6 +2998,9 @@ try {
         $input = json_decode($rawBody === false ? '' : substr($rawBody, 0, 2048), true, 16, JSON_THROW_ON_ERROR);
         $paymentId = is_array($input) ? ($input['payment_id'] ?? null) : null;
         $reason = is_array($input) ? ($input['reason'] ?? null) : null;
+        if (is_string($paymentId)) {
+            hydrateKomercePayment($paymentId);
+        }
         if (!is_array($input) || array_diff(array_keys($input), ['payment_id', 'reason']) !== []
             || !is_string($paymentId) || preg_match('#^[A-Za-z0-9._/-]{1,100}$#', $paymentId) !== 1
             || empty($_SESSION['komerce_payments'][$paymentId])) {
@@ -2112,27 +3144,31 @@ try {
                 throw new RuntimeException('Gateway QRIS GoPay mengembalikan respons yang tidak dikenali.');
             }
             $paymentId = GOPAY_PREFIX . $qris['qris_id'];
-            $_SESSION['komerce_payments'][$paymentId] = [
+            $paymentPayload = [
+                'payment_id' => $paymentId,
+                'payment_type' => 'gopay',
+                'qris_string' => $qris['qris_code'],
+                'amount' => (int) ($qris['total_amount'] ?? $amount),
+                'original_amount' => (int) ($qris['amount'] ?? $amount),
+                'unique_code' => $qris['unique_code'] ?? null,
+                'trx_id' => $qris['trx_id'] ?? null,
+                'expired_at' => $qris['expires_at'] ?? null,
+                'status' => 'PENDING',
+                'order_id' => $orderRef,
+            ];
+            storeKomercePayment($paymentId, [
                 'invoice_id' => (int) $invoice['id'],
                 'order_id' => is_scalar($order['order_id'] ?? null) ? (int) $order['order_id'] : null,
                 'order_ref' => $orderRef,
                 'gateway_id' => $gatewayId,
                 'trx_id' => is_string($qris['trx_id'] ?? null) ? $qris['trx_id'] : null,
-            ];
+                'method' => $method,
+                'created_at' => time(),
+                'payment' => $paymentPayload,
+            ]);
 
             respond([
-                'payment' => [
-                    'payment_id' => $paymentId,
-                    'payment_type' => 'gopay',
-                    'qris_string' => $qris['qris_code'],
-                    'amount' => (int) ($qris['total_amount'] ?? $amount),
-                    'original_amount' => (int) ($qris['amount'] ?? $amount),
-                    'unique_code' => $qris['unique_code'] ?? null,
-                    'trx_id' => $qris['trx_id'] ?? null,
-                    'expired_at' => $qris['expires_at'] ?? null,
-                    'status' => 'PENDING',
-                    'order_id' => $orderRef,
-                ],
+                'payment' => $paymentPayload,
                 'invoice' => ['id' => (int) $invoice['id'], 'hash' => $hash, 'total' => $invoiceTotal],
                 'error' => null,
             ]);
@@ -2152,24 +3188,28 @@ try {
             }
             $paymentId = QRISLY_PREFIX . (int) $qris['history_id'];
             $orderRef = mb_substr(is_string($invoice['serie_nr'] ?? null) && $invoice['serie_nr'] !== '' ? $invoice['serie_nr'] : 'INV' . $invoice['id'], 0, 100);
-            $_SESSION['komerce_payments'][$paymentId] = [
+            $paymentPayload = [
+                'payment_id' => $paymentId,
+                'payment_type' => 'qris',
+                'qris_string' => $qris['qris_string'],
+                'amount' => (int) ($qris['final_amount'] ?? $amount),
+                'original_amount' => (int) ($qris['original_amount'] ?? $amount),
+                'expired_at' => $qris['expiry_time'] ?? null,
+                'status' => 'PENDING',
+                'order_id' => $orderRef,
+            ];
+            storeKomercePayment($paymentId, [
                 'invoice_id' => (int) $invoice['id'],
                 'order_id' => is_scalar($order['order_id'] ?? null) ? (int) $order['order_id'] : null,
                 'order_ref' => $orderRef,
                 'gateway_id' => $gatewayId,
-            ];
+                'method' => $method,
+                'created_at' => time(),
+                'payment' => $paymentPayload,
+            ]);
 
             respond([
-                'payment' => [
-                    'payment_id' => $paymentId,
-                    'payment_type' => 'qris',
-                    'qris_string' => $qris['qris_string'],
-                    'amount' => (int) ($qris['final_amount'] ?? $amount),
-                    'original_amount' => (int) ($qris['original_amount'] ?? $amount),
-                    'expired_at' => $qris['expiry_time'] ?? null,
-                    'status' => 'PENDING',
-                    'order_id' => $orderRef,
-                ],
+                'payment' => $paymentPayload,
                 'invoice' => ['id' => (int) $invoice['id'], 'hash' => $hash, 'total' => $invoiceTotal],
                 'error' => null,
             ]);
@@ -2209,12 +3249,15 @@ try {
         if (!is_string($paymentId) || preg_match('#^[A-Za-z0-9._/-]{1,100}$#', $paymentId) !== 1) {
             throw new RuntimeException('Komerce returned an unexpected payment response.');
         }
-        $_SESSION['komerce_payments'][$paymentId] = [
+        storeKomercePayment($paymentId, [
             'invoice_id' => (int) $invoice['id'],
             'order_id' => is_scalar($order['order_id'] ?? null) ? (int) $order['order_id'] : null,
             'order_ref' => mb_substr(is_string($invoice['serie_nr'] ?? null) && $invoice['serie_nr'] !== '' ? $invoice['serie_nr'] : 'INV' . $invoice['id'], 0, 100),
             'gateway_id' => $gatewayId,
-        ];
+            'method' => $method,
+            'created_at' => time(),
+            'payment' => is_array($payment) ? $payment : [],
+        ]);
 
         respond(['payment' => $payment, 'invoice' => ['id' => (int) $invoice['id'], 'hash' => $hash, 'total' => (int) round((float) $invoice['total'])], 'error' => null]);
     }
@@ -2332,6 +3375,11 @@ try {
                 || !hash_equals((string) $ownerId, (string) $invoiceClientId)) {
                 respond(['error' => 'Tagihan tidak ditemukan.'], 404);
             }
+        }
+
+        $resumed = resumeInvoiceGatewayPayment($invoice, $method);
+        if ($resumed !== null) {
+            respond($resumed);
         }
 
         respondInvoiceGatewayPayment($invoice, $method);
@@ -2520,6 +3568,20 @@ try {
         }
 
         callFossBillingClient('support/ticket_close', ['id' => (int) $ticketId]);
+        respond(['result' => true, 'error' => null]);
+    }
+
+    if ($action === 'email-resend' || $action === 'email-delete') {
+        $rawBody = file_get_contents('php://input');
+        $input = json_decode($rawBody === false ? '' : substr($rawBody, 0, 1024), true, 16, JSON_THROW_ON_ERROR);
+        $emailId = is_array($input) ? ($input['id'] ?? null) : null;
+        if (!is_array($input) || array_diff(array_keys($input), ['id']) !== []
+            || !is_string($emailId) || preg_match('/^[0-9]{1,18}$/', $emailId) !== 1) {
+            respond(['error' => 'ID email tidak valid.'], 422);
+        }
+
+        $endpoint = $action === 'email-resend' ? 'email/resend' : 'email/delete';
+        callFossBillingClient($endpoint, ['id' => (int) $emailId]);
         respond(['result' => true, 'error' => null]);
     }
 

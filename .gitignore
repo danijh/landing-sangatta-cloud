@@ -23,3 +23,6 @@ Thumbs.db
 !.vscode/settings.json
 
 img-sample/
+
+# Agent/tool state
+.codebase-memory/

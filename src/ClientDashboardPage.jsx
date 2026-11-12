@@ -10,6 +10,7 @@ import {
   Cloud,
   Copy,
   CreditCard,
+  Eye,
   FileText,
   Gauge,
   HardDrive,
@@ -20,16 +21,20 @@ import {
   Menu,
   Newspaper,
   PackagePlus,
+  RefreshCw,
   Search,
   ShoppingCart,
   Settings2,
   ShieldCheck,
+  Trash2,
   UserRound,
   Wallet,
   Quote,
   X,
 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { NotificationBell, useNotifications } from './notifications.jsx'
 import QRCode from 'qrcode'
 import { getPaymentGuide, guideMethodLabels } from './paymentGuides'
@@ -61,12 +66,6 @@ const dashboardMenuItems = [
   { id: 'wallet', label: 'Dompet', icon: Wallet },
   { id: 'news', label: 'Berita', icon: Newspaper },
   { id: 'knowledge-base', label: 'Pusat Bantuan', icon: BookOpen },
-]
-
-const supportArticles = [
-  { category: 'Akun & keamanan', title: 'Cara mengamankan akun Sangatta Cloud', readTime: '3 menit baca' },
-  { category: 'Layanan', title: 'Mengelola dan memperpanjang layanan', readTime: '4 menit baca' },
-  { category: 'Pembayaran', title: 'Metode pembayaran dan status tagihan', readTime: '2 menit baca' },
 ]
 
 function formatCompactPrice(price) {
@@ -175,6 +174,26 @@ function formatInvoiceDate(value) {
   return new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }).format(date)
 }
 
+function formatArticleDate(value) {
+  if (!value) return ''
+  const date = new Date(`${String(value).replace(' ', 'T')}Z`)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('id-ID', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+}
+
+function formatEmailDate(value) {
+  if (!value) return '-'
+  const date = new Date(String(value).replace(' ', 'T'))
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date)
+}
+
 function invoiceStatusDisplay(status) {
   switch (String(status || '').toLowerCase()) {
     case 'paid':
@@ -237,6 +256,27 @@ function servicePeriodLabel(period) {
   return unit && units[unit] ? units[unit] : ''
 }
 
+function isServiceOrderActive(order) {
+  const status = String(order?.status || '').toLowerCase()
+  if (!['active', 'paid'].includes(status)) return false
+  if (!order?.expires_at) return true
+  const expiry = new Date(String(order.expires_at).replace(' ', 'T')).getTime()
+  if (!Number.isFinite(expiry)) return true
+  const startOfToday = new Date()
+  startOfToday.setHours(0, 0, 0, 0)
+  return expiry >= startOfToday.getTime()
+}
+
+function formatStorageBytes(value) {
+  const bytes = Number(value)
+  if (!Number.isFinite(bytes) || bytes < 0) return '-'
+  const units = [['TB', 1099511627776], ['GB', 1073741824], ['MB', 1048576], ['KB', 1024]]
+  for (const [unit, size] of units) {
+    if (bytes >= size) return `${(bytes / size).toFixed(bytes >= size * 10 ? 0 : 1)} ${unit}`
+  }
+  return `${bytes} B`
+}
+
 function formatRelativeTime(value) {
   const date = value ? new Date(`${String(value).replace(' ', 'T')}Z`) : null
   if (!date || Number.isNaN(date.getTime())) return value || '-'
@@ -268,10 +308,12 @@ function ClientDashboardPage() {
   const [isChangingPassword, setIsChangingPassword] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [serviceOrders, setServiceOrders] = useState([])
+  const [storageSummary, setStorageSummary] = useState(null)
   const [serviceState, setServiceState] = useState('idle')
   const [serviceError, setServiceError] = useState('')
   const [serviceLoadAttempt, setServiceLoadAttempt] = useState(0)
   const [servicePage, setServicePage] = useState(1)
+  const [serviceDetail, setServiceDetail] = useState(null)
   const [invoiceRecords, setInvoiceRecords] = useState([])
   const [invoiceState, setInvoiceState] = useState('idle')
   const [invoiceError, setInvoiceError] = useState('')
@@ -311,6 +353,7 @@ function ClientDashboardPage() {
   const [invoicePayMethod, setInvoicePayMethod] = useState('')
   const [invoicePayError, setInvoicePayError] = useState('')
   const [isPayingInvoice, setIsPayingInvoice] = useState(false)
+  const [isCheckingInvoicePayment, setIsCheckingInvoicePayment] = useState(false)
   const [periodConflict, setPeriodConflict] = useState(null)
   const [cancelOpen, setCancelOpen] = useState(false)
   const [cancelReason, setCancelReason] = useState('')
@@ -326,8 +369,19 @@ function ClientDashboardPage() {
   const [invoiceDetail, setInvoiceDetail] = useState(null)
   const [invoiceDetailState, setInvoiceDetailState] = useState('idle')
   const [invoiceDetailError, setInvoiceDetailError] = useState('')
+  const [emailRecords, setEmailRecords] = useState([])
+  const [emailState, setEmailState] = useState('idle')
+  const [emailError, setEmailError] = useState('')
+  const [emailLoadAttempt, setEmailLoadAttempt] = useState(0)
+  const [selectedEmailId, setSelectedEmailId] = useState(null)
+  const [emailDetail, setEmailDetail] = useState({ status: 'idle', data: null, error: '' })
+  const [emailBusyId, setEmailBusyId] = useState('')
+  const [emailDeleteTarget, setEmailDeleteTarget] = useState(null)
+  const [isEmailDeleting, setIsEmailDeleting] = useState(false)
+  const [emailViewOpen, setEmailViewOpen] = useState(false)
   const [isPdfDownloading, setIsPdfDownloading] = useState(false)
   const [ticketModalOpen, setTicketModalOpen] = useState(false)
+  const [ticketRelOrder, setTicketRelOrder] = useState(null)
   const [helpdesks, setHelpdesks] = useState([])
   const [helpdeskState, setHelpdeskState] = useState('idle')
   const [isCreatingTicket, setIsCreatingTicket] = useState(false)
@@ -343,6 +397,16 @@ function ClientDashboardPage() {
   const [ticketListState, setTicketListState] = useState('idle')
   const [ticketListError, setTicketListError] = useState('')
   const [ticketListAttempt, setTicketListAttempt] = useState(0)
+  const [newsItems, setNewsItems] = useState([])
+  const [newsState, setNewsState] = useState('idle')
+  const [newsError, setNewsError] = useState('')
+  const [newsLoadAttempt, setNewsLoadAttempt] = useState(0)
+  const [newsArticle, setNewsArticle] = useState(null)
+  const [kbCategories, setKbCategories] = useState([])
+  const [kbState, setKbState] = useState('idle')
+  const [kbError, setKbError] = useState('')
+  const [kbLoadAttempt, setKbLoadAttempt] = useState(0)
+  const [kbArticleModal, setKbArticleModal] = useState({ status: 'idle', article: null, error: '' })
   const [bellOpen, setBellOpen] = useState(false)
   const activeTicketIdRef = useRef(activeTicketId)
   activeTicketIdRef.current = activeTicketId
@@ -491,6 +555,64 @@ function ClientDashboardPage() {
   }, [activePage, authState, activeTicketId])
 
   useEffect(() => {
+    if (authState !== 'authenticated' || activePage !== 'news') return undefined
+
+    const controller = new AbortController()
+    setNewsState('loading')
+    setNewsError('')
+
+    fetch('/api/content.php?action=news', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result || !Array.isArray(result.news)) {
+          throw new Error(result?.error || 'Berita tidak dapat dimuat.')
+        }
+        setNewsItems(result.news)
+        setNewsState('loaded')
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setNewsError(error.message || 'Berita tidak dapat dimuat.')
+          setNewsState('error')
+        }
+      })
+
+    return () => controller.abort()
+  }, [activePage, authState, newsLoadAttempt])
+
+  useEffect(() => {
+    if (authState !== 'authenticated' || activePage !== 'knowledge-base') return undefined
+
+    const controller = new AbortController()
+    setKbState('loading')
+    setKbError('')
+
+    fetch('/api/content.php?action=kb-categories&per_page=100', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result || !Array.isArray(result.categories)) {
+          throw new Error(result?.error || 'Artikel bantuan tidak dapat dimuat.')
+        }
+        setKbCategories(result.categories)
+        setKbState('loaded')
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setKbError(error.message || 'Artikel bantuan tidak dapat dimuat.')
+          setKbState('error')
+        }
+      })
+
+    return () => controller.abort()
+  }, [activePage, authState, kbLoadAttempt])
+
+  useEffect(() => {
     if (!ticketModalOpen) return undefined
 
     const controller = new AbortController()
@@ -516,7 +638,7 @@ function ClientDashboardPage() {
   }, [ticketModalOpen])
 
   useEffect(() => {
-    if (authState !== 'authenticated' || !['services', 'orders', 'checkout'].includes(activePage)) return undefined
+    if (authState !== 'authenticated' || !['dashboard', 'services', 'orders', 'checkout'].includes(activePage)) return undefined
 
     const controller = new AbortController()
     setServiceState('loading')
@@ -532,6 +654,7 @@ function ClientDashboardPage() {
           throw new Error(result?.error || 'Daftar layanan tidak dapat dimuat.')
         }
         setServiceOrders(result.orders)
+        setStorageSummary(result.storage && typeof result.storage === 'object' ? result.storage : null)
         setServicePage(1)
         setServiceState('loaded')
       })
@@ -573,6 +696,71 @@ function ClientDashboardPage() {
 
     return () => controller.abort()
   }, [activePage, authState, invoiceLoadAttempt])
+
+  useEffect(() => {
+    if (authState !== 'authenticated' || activePage !== 'emails') return undefined
+
+    const controller = new AbortController()
+    setEmailState('loading')
+    setEmailError('')
+
+    fetch('/api/fossbilling-auth.php?action=emails', {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result || !Array.isArray(result.emails)) {
+          throw new Error(result?.error || 'Daftar email tidak dapat dimuat.')
+        }
+        setEmailRecords(result.emails)
+        setEmailState('loaded')
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setEmailError(error.message || 'Daftar email tidak dapat dimuat.')
+          setEmailState('error')
+        }
+      })
+
+    return () => controller.abort()
+  }, [activePage, authState, emailLoadAttempt])
+
+  useEffect(() => {
+    if (emailState !== 'loaded') return
+    if (!emailRecords.some((email) => email.id === selectedEmailId)) {
+      setSelectedEmailId(emailRecords[0]?.id ?? null)
+    }
+  }, [emailRecords, emailState, selectedEmailId])
+
+  useEffect(() => {
+    if (!selectedEmailId) {
+      setEmailDetail({ status: 'idle', data: null, error: '' })
+      return undefined
+    }
+
+    const controller = new AbortController()
+    setEmailDetail({ status: 'loading', data: null, error: '' })
+
+    fetch(`/api/fossbilling-auth.php?action=email&id=${encodeURIComponent(selectedEmailId)}`, {
+      credentials: 'same-origin',
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result || !result.email || typeof result.email !== 'object') {
+          throw new Error(result?.error || 'Isi email tidak dapat dimuat.')
+        }
+        setEmailDetail({ status: 'loaded', data: result.email, error: '' })
+      })
+      .catch((error) => {
+        if (error.name !== 'AbortError') {
+          setEmailDetail({ status: 'error', data: null, error: error.message || 'Isi email tidak dapat dimuat.' })
+        }
+      })
+
+    return () => controller.abort()
+  }, [selectedEmailId])
 
   useEffect(() => {
     if (authState !== 'authenticated') return undefined
@@ -748,6 +936,34 @@ function ClientDashboardPage() {
     }
   }
 
+  const handleEmailAction = async (action, email) => {
+    setEmailBusyId(email.id)
+    setNotice('')
+    try {
+      const response = await fetch(`/api/fossbilling-auth.php?action=${action}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+        body: JSON.stringify({ id: email.id }),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(result?.error || 'Permintaan tidak dapat diproses.')
+      }
+      if (action === 'email-resend') {
+        setNotice(`Email "${email.subject || 'tanpa subjek'}" dikirim ulang.`)
+      } else {
+        setEmailRecords((current) => current.filter((item) => item.id !== email.id))
+        setEmailDeleteTarget(null)
+        setNotice('Email dihapus dari riwayat.')
+      }
+    } catch (error) {
+      setNotice(error.message || 'Permintaan tidak dapat diproses.')
+    } finally {
+      setEmailBusyId('')
+    }
+  }
+
   const openPage = (page) => {
     setCartOpen(false)
     if (page === 'support') {
@@ -758,10 +974,50 @@ function ClientDashboardPage() {
       setTicketListAttempt((attempt) => attempt + 1)
     }
     setBellOpen(false)
+    setServiceDetail(null)
+    if (page !== 'news') setNewsArticle(null)
+    if (page !== 'knowledge-base') setKbArticleModal({ status: 'idle', article: null, error: '' })
     setActivePage(page)
     setMenuOpen(false)
     setNotice('')
     window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  const openNewsArticle = (item) => {
+    const ref = { slug: item.slug || '', id: item.id }
+    setNewsArticle({ status: 'loading', article: null, ref, error: '' })
+    const query = ref.slug
+      ? `slug=${encodeURIComponent(ref.slug)}`
+      : `id=${encodeURIComponent(ref.id)}`
+    fetch(`/api/content.php?action=news-article&${query}`, { credentials: 'same-origin' })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result?.article || typeof result.article !== 'object') {
+          throw new Error(result?.error || 'Berita tidak dapat dimuat.')
+        }
+        setNewsArticle({ status: 'loaded', article: result.article, ref, error: '' })
+      })
+      .catch((error) => {
+        setNewsArticle({ status: 'error', article: null, ref, error: error.message || 'Berita tidak dapat dimuat.' })
+      })
+  }
+
+  const openKbArticle = (article) => {
+    setKbArticleModal({ status: 'loading', article, error: '' })
+    const query = article.slug
+      ? `slug=${encodeURIComponent(article.slug)}`
+      : `id=${encodeURIComponent(article.id)}`
+    fetch(`/api/content.php?action=kb-article&${query}`, { credentials: 'same-origin' })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result?.article || typeof result.article !== 'object') {
+          throw new Error(result?.error || 'Artikel tidak dapat dimuat.')
+        }
+        setKbArticleModal({ status: 'loaded', article: result.article, error: '' })
+      })
+      .catch((error) => {
+        setKbArticleModal({ status: 'error', article, error: error.message || 'Artikel tidak dapat dimuat.' })
+      })
   }
 
   const { unreadTicketIds, markTicketRead } = notifications
@@ -774,6 +1030,26 @@ function ClientDashboardPage() {
   }, [activeTicketUnread, activeTicketId])
   const supportUnread = unreadTicketIds.size
   const unpaidInvoiceCount = invoiceRecords.filter((invoice) => invoice.status === 'unpaid').length
+  const nextUnpaidDueAt = invoiceRecords
+    .filter((invoice) => invoice.status === 'unpaid' && invoice.due_at)
+    .map((invoice) => invoice.due_at)
+    .sort()[0] || null
+  const activeServiceOrders = serviceOrders
+    .filter(isServiceOrderActive)
+    .sort((a, b) => {
+      const aExp = a.expires_at ? new Date(String(a.expires_at).replace(' ', 'T')).getTime() : Number.MAX_SAFE_INTEGER
+      const bExp = b.expires_at ? new Date(String(b.expires_at).replace(' ', 'T')).getTime() : Number.MAX_SAFE_INTEGER
+      return aExp - bExp
+    })
+  const kbArticleHtml = useMemo(() => {
+    const content = kbArticleModal.article?.content
+    if (typeof content !== 'string' || content.trim() === '') return ''
+    try {
+      return DOMPurify.sanitize(marked.parse(content, { async: false, breaks: true }))
+    } catch {
+      return ''
+    }
+  }, [kbArticleModal.article?.content])
 
   const customerName = profile?.name
     || [profile?.first_name, profile?.last_name].filter(Boolean).join(' ')
@@ -843,6 +1119,7 @@ function ClientDashboardPage() {
           support_helpdesk_id: String(formData.get('support_helpdesk_id') || ''),
           subject: String(formData.get('subject') || ''),
           content: String(formData.get('message') || ''),
+          ...(ticketRelOrder ? { rel_type: 'order', rel_id: String(ticketRelOrder.id) } : {}),
         }),
       })
       const result = await response.json().catch(() => null)
@@ -852,8 +1129,10 @@ function ClientDashboardPage() {
       setTicket(null)
       setReplyOpen(false)
       setReplyText('')
-      setActiveTicketId(result.result)
+      setTicketRelOrder(null)
       setTicketModalOpen(false)
+      openPage('support')
+      setActiveTicketId(result.result)
       setNotice('Tiket berhasil dibuat.')
     } catch (error) {
       setNotice(error.message || 'Tiket tidak dapat dibuat.')
@@ -1291,6 +1570,30 @@ function ClientDashboardPage() {
     }
   }
 
+  const handleOpenInvoicePay = async (invoice) => {
+    if (isCheckingInvoicePayment) return
+    setIsCheckingInvoicePayment(true)
+    try {
+      const response = await fetch(`/api/fossbilling-auth.php?action=invoice-payment&id=${encodeURIComponent(invoice.id)}`, { credentials: 'same-origin' })
+      const result = await response.json().catch(() => null)
+      if (response.ok && result?.payment?.payment_id) {
+        setPaymentResult(result)
+        setPaymentStatus({ state: 'idle', data: null, error: '' })
+        setNotice('Melanjutkan pembayaran yang masih berlaku.')
+        openPage('payment')
+        loadPaymentStatus(result.payment.payment_id)
+        return
+      }
+    } catch {
+      // Gagal cek — lanjutkan ke pemilihan metode seperti biasa.
+    } finally {
+      setIsCheckingInvoicePayment(false)
+    }
+    setInvoicePayModal(invoice)
+    setInvoicePayMethod('')
+    setInvoicePayError('')
+  }
+
   const handlePayInvoice = async () => {
     if (!invoicePayModal) return
     if (!invoicePayMethod) {
@@ -1314,12 +1617,38 @@ function ClientDashboardPage() {
       setPaymentStatus({ state: 'idle', data: null, error: '' })
       setInvoicePayModal(null)
       setInvoicePayMethod('')
+      if (result?.resumed === true) {
+        setNotice('Melanjutkan pembayaran yang masih berlaku.')
+      }
       openPage('payment')
       loadPaymentStatus(result.payment.payment_id)
     } catch (error) {
       setInvoicePayError(error.message || 'Pembayaran gagal diproses.')
     } finally {
       setIsPayingInvoice(false)
+    }
+  }
+
+  const downloadInvoicePdf = async (id, number) => {
+    if (isPdfDownloading) return
+    setIsPdfDownloading(true)
+    try {
+      const response = await fetch(`/api/fossbilling-auth.php?action=invoice-pdf&id=${encodeURIComponent(id)}`, { credentials: 'same-origin' })
+      if (!response.ok) {
+        const result = await response.json().catch(() => null)
+        throw new Error(result?.error || 'PDF tidak dapat diunduh.')
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${number || `invoice-${id}`}.pdf`
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setNotice(err.message || 'PDF tidak dapat diunduh.')
+    } finally {
+      setIsPdfDownloading(false)
     }
   }
 
@@ -1762,7 +2091,7 @@ function ClientDashboardPage() {
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading dashboard-page-heading-action">
             <div><span className="dashboard-section-kicker">BANTUAN PELANGGAN</span><h2>Tiket dukungan</h2><p>Ada pertanyaan? Tim kami siap membantu.</p></div>
-            <button className="dashboard-primary-action" type="button" onClick={() => setTicketModalOpen(true)}><LifeBuoy size={16} /> Tiket baru</button>
+            <button className="dashboard-primary-action" type="button" onClick={() => { setTicketRelOrder(null); setTicketModalOpen(true) }}><LifeBuoy size={16} /> Tiket baru</button>
           </div>
           {ticketListState === 'loading' || ticketListState === 'idle' ? (
             <div className="dashboard-profile-loading" role="status">Memuat tiket...</div>
@@ -1801,6 +2130,170 @@ function ClientDashboardPage() {
     }
 
     if (activePage === 'services') {
+      if (serviceDetail) {
+        const svc = serviceDetail
+        const svcStatus = String(svc.status || '').toLowerCase()
+        const svcCurrency = typeof svc.currency === 'string' && /^[A-Za-z]{3}$/.test(svc.currency)
+          ? svc.currency.toUpperCase()
+          : 'IDR'
+        const svcPeriodName = servicePeriodLabel(svc.period)
+        const svcTotal = svc.total !== null && svc.total !== undefined && svc.total !== '' && Number.isFinite(Number(svc.total))
+          ? Number(svc.total)
+          : (svc.price !== null && svc.price !== undefined && svc.price !== '' && Number.isFinite(Number(svc.price)) ? Number(svc.price) : null)
+        const svcPriceLabel = svcTotal !== null
+          ? `${formatFullPrice(svcTotal, svcCurrency)}${svcPeriodName ? ` / ${svcPeriodName}` : ''}`
+          : '-'
+
+        const svcParseDate = (value) => {
+          if (!value) return null
+          const date = new Date(String(value).replace(' ', 'T'))
+          return Number.isNaN(date.getTime()) ? null : date
+        }
+        const svcFormatDate = (value) => {
+          const date = svcParseDate(value)
+          return date
+            ? new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date)
+            : (value || '-')
+        }
+        const svcStartOfToday = new Date()
+        svcStartOfToday.setHours(0, 0, 0, 0)
+        const svcExpiry = svcParseDate(svc.expires_at)
+        const svcDaysLeft = svcExpiry
+          ? Math.ceil((svcExpiry - svcStartOfToday) / 86400000)
+          : null
+        const svcIsExpired = svcDaysLeft !== null && svcDaysLeft < 0
+
+        const svcPaidStatuses = ['paid', 'active']
+        const svcCancelledStatuses = ['canceled', 'cancelled']
+        const svcPendingStatuses = ['pending', 'pending_setup', 'unpaid', 'awaiting_payment']
+        const svcExpiredStatuses = ['expired', 'overdue', 'failed', 'failed_setup']
+        const svcFallbackLabel = svcStatus.replace(/[_-]/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+        let svcStatusLabel = svcFallbackLabel || 'Tidak diketahui'
+        let svcStatusTone = 'status-closed'
+        if (svcPaidStatuses.includes(svcStatus)) {
+          svcStatusLabel = svcIsExpired ? 'Kedaluwarsa' : 'Aktif'
+          svcStatusTone = svcIsExpired ? 'status-closed' : 'status-active'
+        } else if (svcCancelledStatuses.includes(svcStatus)) {
+          svcStatusLabel = 'Dibatalkan'
+        } else if (svcExpiredStatuses.includes(svcStatus) || (svcIsExpired && svcPendingStatuses.includes(svcStatus))) {
+          svcStatusLabel = 'Kedaluwarsa'
+        } else if (svcPendingStatuses.includes(svcStatus)) {
+          svcStatusLabel = 'Menunggu pembayaran'
+          svcStatusTone = 'status-pending'
+        } else if (svcStatus === 'suspended') {
+          svcStatusLabel = 'Ditangguhkan'
+        }
+
+        return (
+          <section className="dashboard-page-panel">
+            <div className="dashboard-page-heading dashboard-invoice-detail-heading">
+              <div>
+                <nav className="dashboard-breadcrumb" aria-label="Navigasi">
+                  <button type="button" onClick={() => setServiceDetail(null)}>
+                    <ArrowLeft size={13} /> Layanan
+                  </button>
+                  <ChevronRight size={13} />
+                  <strong>#{svc.id}</strong>
+                </nav>
+                <h2>Ringkasan Layanan</h2>
+                <p>Detail order #{svc.id} — {svc.title}.</p>
+              </div>
+              <div className="dashboard-invoice-detail-actions">
+                {!svcCancelledStatuses.includes(svcStatus) && svcStatus !== 'suspended' && (
+                  <button type="button" className="dashboard-outline-action" onClick={() => openPage('orders')}>
+                    <RefreshCw size={15} /> Perpanjang
+                  </button>
+                )}
+                {svc.unpaid_invoice_id && (
+                  <button type="button" className="dashboard-outline-action" onClick={() => openPage('invoices')}>
+                    <FileText size={15} /> Lihat Tagihan
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="dashboard-outline-action"
+                  onClick={() => { setTicketRelOrder(svc); setTicketModalOpen(true) }}
+                >
+                  <LifeBuoy size={15} /> Buka Tiket Bantuan
+                </button>
+              </div>
+            </div>
+
+            <div className="dashboard-invoice-summary">
+              <div className="dashboard-invoice-summary-header">
+                <div className="dashboard-invoice-summary-meta">
+                  <div className="dashboard-invoice-meta-row">
+                    <span>Nomor Order</span>
+                    <strong>#{svc.id}</strong>
+                  </div>
+                  <div className="dashboard-invoice-meta-row">
+                    <span>Produk / Layanan</span>
+                    <strong>{svc.title}</strong>
+                  </div>
+                  <div className="dashboard-invoice-meta-row">
+                    <span>Status</span>
+                    <span className={`dashboard-status ${svcStatusTone}`}><i />{svcStatusLabel}</span>
+                  </div>
+                  <div className="dashboard-invoice-meta-row">
+                    <span>Periode</span>
+                    <strong>{svcPeriodName || svc.period || '-'}</strong>
+                  </div>
+                  <div className="dashboard-invoice-meta-row">
+                    <span>Harga</span>
+                    <strong>{svcPriceLabel}</strong>
+                  </div>
+                  <div className="dashboard-invoice-meta-row">
+                    <span>Tiket Dukungan Aktif</span>
+                    <strong>
+                      {Number(svc.active_tickets) > 0 ? (
+                        <button
+                          type="button"
+                          className="dashboard-text-action"
+                          onClick={() => openPage('support')}
+                        >
+                          {svc.active_tickets}
+                        </button>
+                      ) : (
+                        svc.active_tickets ?? 0
+                      )}
+                    </strong>
+                  </div>
+                </div>
+                <div className="dashboard-invoice-parties">
+                  <div className="dashboard-invoice-party">
+                    <small>PERIODE AKTIF</small>
+                    <strong>{svcFormatDate(svc.activated_at)}</strong>
+                    <span>s/d {svcFormatDate(svc.expires_at)}</span>
+                    {svcDaysLeft !== null && (
+                      <span className={svcIsExpired ? 'dashboard-service-days dashboard-service-days-expired' : 'dashboard-service-days'}>
+                        {svcIsExpired
+                          ? `Kedaluwarsa ${Math.abs(svcDaysLeft)} hari yang lalu`
+                          : svcDaysLeft === 0
+                            ? 'Berakhir hari ini'
+                            : `${svcDaysLeft} hari lagi`}
+                      </span>
+                    )}
+                  </div>
+                  <div className="dashboard-invoice-party">
+                    <small>INFORMASI ORDER</small>
+                    <span>Dibuat: {svcFormatDate(svc.created_at)}</span>
+                    {svc.canceled_at && <span>Dibatalkan: {svcFormatDate(svc.canceled_at)}</span>}
+                    {svc.reason && <span>Alasan: {svc.reason}</span>}
+                  </div>
+                </div>
+              </div>
+
+              {svc.notes && (
+                <div className="dashboard-invoice-notes">
+                  <small>Catatan</small>
+                  <p>{svc.notes}</p>
+                </div>
+              )}
+            </div>
+          </section>
+        )
+      }
+
       const startOfTodaySort = new Date()
       startOfTodaySort.setHours(0, 0, 0, 0)
       const serviceStatusRank = (service) => {
@@ -1884,10 +2377,10 @@ function ClientDashboardPage() {
 
                     return (
                       <tr key={service.id}>
-                        <td><button className="dashboard-text-action" type="button" onClick={() => setNotice(`Detail order #${service.id} akan tersedia setelah API FossBilling terhubung.`)}>#{service.id}</button></td>
+                        <td><button className="dashboard-text-action" type="button" onClick={() => setServiceDetail(service)}>#{service.id}</button></td>
                         <td>{service.title}</td><td>{priceLabel}</td><td>{dueLabel}</td>
                         <td><span className={`dashboard-status ${statusTone}`}><i />{statusLabel}</span></td>
-                        <td><button className="dashboard-outline-action" type="button" onClick={() => setNotice(`Pengelolaan ${service.title} akan tersedia setelah API FossBilling terhubung.`)}>Kelola</button></td>
+                        <td><button className="dashboard-outline-action" type="button" onClick={() => setServiceDetail(service)}>Kelola</button></td>
                       </tr>
                     )
                   }) : <tr><td className="dashboard-table-empty" colSpan="6">Belum ada layanan.</td></tr>}</tbody>
@@ -1918,27 +2411,8 @@ function ClientDashboardPage() {
         const { label: statusLabel, tone: statusTone } = invoiceStatusDisplay(inv.status)
         const lines = Array.isArray(inv.lines) ? inv.lines : []
 
-        const handlePdfDownload = async () => {
-          if (isPdfDownloading) return
-          setIsPdfDownloading(true)
-          try {
-            const response = await fetch(`/api/fossbilling-auth.php?action=invoice-pdf&id=${encodeURIComponent(inv.id)}`, { credentials: 'same-origin' })
-            if (!response.ok) {
-              const result = await response.json().catch(() => null)
-              throw new Error(result?.error || 'PDF tidak dapat diunduh.')
-            }
-            const blob = await response.blob()
-            const url = URL.createObjectURL(blob)
-            const a = document.createElement('a')
-            a.href = url
-            a.download = `${inv.number || `invoice-${inv.id}`}.pdf`
-            a.click()
-            URL.revokeObjectURL(url)
-          } catch (err) {
-            setNotice(err.message || 'PDF tidak dapat diunduh.')
-          } finally {
-            setIsPdfDownloading(false)
-          }
+        const handlePdfDownload = () => {
+          downloadInvoicePdf(inv.id, inv.number)
         }
 
         const handlePrint = () => {
@@ -2143,16 +2617,25 @@ function ClientDashboardPage() {
       }
 
       // ── Invoice list ─────────────────────────────────────────────────────────
-      const invoiceStatusFilters = [
-        { label: 'Menunggu', statuses: ['unpaid'] },
-        { label: 'Lunas', statuses: ['paid'] },
-        { label: 'Dikembalikan', statuses: ['refunded'] },
-        { label: 'Dibatalkan', statuses: ['canceled'] },
-      ]
-      const activeFilter = invoiceStatusFilters.find((filter) => filter.label === invoiceFilter) || invoiceStatusFilters[0]
-      const filteredInvoices = invoiceRecords.filter((invoice) => activeFilter.statuses.includes(invoice.status))
       const startOfToday = new Date()
       startOfToday.setHours(0, 0, 0, 0)
+      const invoiceIsPastDue = (invoice) => {
+        if (String(invoice.status || '').toLowerCase() !== 'unpaid' || !invoice.due_at) return false
+        const dueDate = new Date(String(invoice.due_at).replace(' ', 'T'))
+        return !Number.isNaN(dueDate.getTime()) && dueDate < startOfToday
+      }
+      const invoiceStatusFilters = [
+        { label: 'Menunggu', statuses: ['unpaid'], exclude: invoiceIsPastDue },
+        { label: 'Lunas', statuses: ['paid'] },
+        { label: 'Dikembalikan', statuses: ['refunded'] },
+        { label: 'Dibatalkan', statuses: ['canceled'], include: (invoice) => invoiceIsPastDue(invoice) },
+      ]
+      const activeFilter = invoiceStatusFilters.find((filter) => filter.label === invoiceFilter) || invoiceStatusFilters[0]
+      const filteredInvoices = invoiceRecords.filter((invoice) => {
+        const status = String(invoice.status || '').toLowerCase()
+        if (activeFilter.exclude?.(invoice)) return false
+        return activeFilter.statuses.includes(status) || Boolean(activeFilter.include?.(invoice))
+      })
 
       const openInvoiceDetail = (invoice) => {
         setInvoiceDetailState('loading')
@@ -2221,6 +2704,7 @@ function ClientDashboardPage() {
                         statusLabel = 'Dibatalkan'
                         statusTone = 'status-closed'
                       } else if (status === 'unpaid' && isPastDue) {
+                        statusLabel = 'Kedaluwarsa'
                         statusTone = 'status-closed'
                       }
                       const isPayable = status === 'unpaid'
@@ -2238,14 +2722,13 @@ function ClientDashboardPage() {
                               type="button"
                               onClick={() => {
                                 if (isPayable && !isPastDue) {
-                                  setInvoicePayModal(invoice)
-                                  setInvoicePayMethod('')
-                                  setInvoicePayError('')
+                                  handleOpenInvoicePay(invoice)
                                 } else {
                                   openInvoiceDetail(invoice)
                                 }
                               }}
-                            >{isPayable && !isPastDue ? 'Bayar' : 'Lihat'}</button>
+                              disabled={isCheckingInvoicePayment}
+                            >{isPayable && !isPastDue ? (isCheckingInvoicePayment ? 'Memeriksa...' : 'Bayar') : 'Lihat'}</button>
                           </td>
                         </tr>
                       )
@@ -2269,10 +2752,70 @@ function ClientDashboardPage() {
     }
 
     if (activePage === 'emails') {
+      const emailLoading = emailState === 'idle' || emailState === 'loading'
+      const selectedEmail = emailRecords.find((email) => email.id === selectedEmailId) || null
+      const emailBusy = emailBusyId !== ''
       return (
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">RIWAYAT AKUN</span><h2>Email</h2><p>Salinan email yang dikirim untuk akunmu akan ditampilkan di sini.</p></div></div>
-          <div className="dashboard-empty-state"><span><Mail size={22} /></span><strong>Belum ada email</strong><p>Email yang kami kirim akan tersedia di sini.</p></div>
+          {emailState === 'error' ? (
+            <div className="dashboard-profile-load-error" role="alert">
+              <p>{emailError}</p>
+              <button type="button" className="dashboard-profile-retry" onClick={() => setEmailLoadAttempt((attempt) => attempt + 1)}>Coba lagi</button>
+            </div>
+          ) : emailLoading ? (
+            <div className="dashboard-profile-loading" role="status">Memuat email...</div>
+          ) : emailRecords.length === 0 ? (
+            <div className="dashboard-empty-state"><span><Mail size={22} /></span><strong>Belum ada email</strong><p>Email yang kami kirim akan tersedia di sini.</p></div>
+          ) : (
+            <div className="dashboard-email-layout">
+              <div className="dashboard-email-list" role="listbox" aria-label="Daftar email">
+                {emailRecords.map((email) => (
+                  <button
+                    key={email.id}
+                    type="button"
+                    role="option"
+                    aria-selected={email.id === selectedEmailId}
+                    className={`dashboard-email-item${email.id === selectedEmailId ? ' is-active' : ''}`}
+                    onClick={() => { setSelectedEmailId(email.id); setEmailViewOpen(false) }}
+                  >
+                    <strong>{email.subject || '(Tanpa subjek)'}</strong>
+                    <small>{formatEmailDate(email.created_at)}</small>
+                  </button>
+                ))}
+              </div>
+              <div className="dashboard-email-preview">
+                {emailDetail.status === 'loading' ? (
+                  <div className="dashboard-profile-loading" role="status">Memuat isi email...</div>
+                ) : emailDetail.status === 'error' ? (
+                  <div className="dashboard-profile-load-error" role="alert"><p>{emailDetail.error}</p></div>
+                ) : emailDetail.data ? (
+                  <>
+                    <div className="dashboard-email-preview-head">
+                      <div className="dashboard-email-preview-meta">
+                        <h3>{emailDetail.data.subject || '(Tanpa subjek)'}</h3>
+                        <p><span>Dari</span> {emailDetail.data.sender || '-'}</p>
+                        <p><span>Kepada</span> {emailDetail.data.recipients || '-'}</p>
+                        <small>{formatEmailDate(emailDetail.data.created_at)}{emailDetail.data.has_attachment ? ' · Ada lampiran' : ''}</small>
+                      </div>
+                      <div className="dashboard-email-actions">
+                        <button type="button" className="dashboard-email-icon-action" onClick={() => setEmailViewOpen(true)} disabled={emailBusy} aria-label="Lihat email" title="Lihat"><Eye size={15} /></button>
+                        <button type="button" className="dashboard-email-icon-action" onClick={() => handleEmailAction('email-resend', selectedEmail || { id: selectedEmailId, subject: emailDetail.data.subject })} disabled={emailBusy} aria-label="Kirim ulang email" title="Kirim ulang"><RefreshCw size={15} /></button>
+                        <button type="button" className="dashboard-email-icon-action dashboard-email-icon-danger" onClick={() => setEmailDeleteTarget(selectedEmail || { id: selectedEmailId, subject: emailDetail.data.subject })} disabled={emailBusy} aria-label="Hapus email" title="Hapus"><Trash2 size={15} /></button>
+                      </div>
+                    </div>
+                    {emailDetail.data.content_html ? (
+                      <iframe className="dashboard-email-frame" sandbox="allow-same-origin allow-popups" srcDoc={emailDetail.data.content_html} title={emailDetail.data.subject || 'Isi email'} />
+                    ) : (
+                      <div className="dashboard-email-text"><pre>{emailDetail.data.content_text || 'Tidak ada isi email.'}</pre></div>
+                    )}
+                  </>
+                ) : (
+                  <div className="dashboard-empty-state"><span><Mail size={22} /></span><strong>Pilih email</strong><p>Isi email akan tampil di sini.</p></div>
+                )}
+              </div>
+            </div>
+          )}
         </section>
       )
     }
@@ -2313,27 +2856,133 @@ function ClientDashboardPage() {
     }
 
     if (activePage === 'news') {
+      if (newsArticle) {
+        const article = newsArticle.article
+        const articleDate = article ? formatArticleDate(article.published_at || article.created_at) : ''
+        const articleMeta = [articleDate, article?.author ? `oleh ${article.author}` : ''].filter(Boolean).join(' ')
+        return (
+          <section className="dashboard-page-panel">
+            {newsArticle.status !== 'loaded' && (
+              <button className="dashboard-text-action dashboard-back-link" type="button" onClick={() => setNewsArticle(null)}>
+                <ArrowLeft size={14} /> Kembali ke daftar
+              </button>
+            )}
+            {newsArticle.status === 'loading' && <div className="dashboard-profile-loading" role="status">Memuat berita...</div>}
+            {newsArticle.status === 'error' && (
+              <div className="dashboard-empty-state">
+                <span><Newspaper size={22} /></span>
+                <strong>{newsArticle.error}</strong>
+                <button className="dashboard-profile-retry" type="button" onClick={() => openNewsArticle(newsArticle.ref || {})}>Coba lagi</button>
+              </div>
+            )}
+            {newsArticle.status === 'loaded' && article && (
+              <article className="dashboard-news-article">
+                <header className="dashboard-news-article-head">
+                  <h2>{article.title}</h2>
+                  {articleMeta && <p className="dashboard-news-meta">{articleMeta}</p>}
+                  {article.description && <p className="dashboard-news-article-desc">{article.description}</p>}
+                </header>
+                {article.image && <img className="dashboard-news-image" src={article.image} alt="" />}
+                {article.content && (
+                  <div className="dashboard-news-article-body" dangerouslySetInnerHTML={{ __html: article.content }} />
+                )}
+                <footer className="dashboard-news-article-foot">
+                  <button className="dashboard-text-action" type="button" onClick={() => setNewsArticle(null)}>
+                    <ArrowLeft size={14} /> Kembali ke daftar
+                  </button>
+                </footer>
+              </article>
+            )}
+          </section>
+        )
+      }
       return (
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">PEMBARUAN</span><h2>Berita & pengumuman</h2><p>Informasi terbaru dari Sangatta Cloud.</p></div></div>
-          <div className="dashboard-news-list">
-            {[['Pemeliharaan sistem terjadwal', 'Kami akan melakukan pemeliharaan rutin untuk menjaga layanan tetap optimal.', '20 Okt 2026'], ['Selamat datang di Sangatta Cloud', 'Terima kasih telah menjadi bagian dari ruang digital yang lebih personal.', '1 Okt 2026']].map(([title, description, date]) => (
-              <article className="dashboard-news-item" key={title}><span className="dashboard-news-icon"><Newspaper size={18} /></span><div><span className="dashboard-news-date">{date}</span><h3>{title}</h3><p>{description}</p><button className="dashboard-text-action" type="button" onClick={() => setNotice('Artikel berita akan tersedia setelah konten terhubung ke FossBilling.')}>Baca selengkapnya <ArrowRight size={14} /></button></div></article>
-            ))}
-          </div>
+          {newsState === 'loading' && <div className="dashboard-profile-loading" role="status">Memuat berita...</div>}
+          {newsState === 'error' && (
+            <div className="dashboard-empty-state">
+              <span><Newspaper size={22} /></span>
+              <strong>{newsError}</strong>
+              <button className="dashboard-profile-retry" type="button" onClick={() => setNewsLoadAttempt((attempt) => attempt + 1)}>Coba lagi</button>
+            </div>
+          )}
+          {newsState === 'loaded' && (newsItems.length ? (
+            <div className="dashboard-news-list">
+              {newsItems.map((item) => {
+                const date = item.published_at || item.created_at
+                return (
+                  <article className="dashboard-news-item" key={item.id}>
+                    <span className="dashboard-news-icon"><Newspaper size={18} /></span>
+                    <div>
+                      <span className="dashboard-news-date">{date ? formatInvoiceDate(date) : ''}</span>
+                      <h3>{item.title}</h3>
+                      {item.description && <p>{item.description}</p>}
+                      {item.content && (
+                        <button className="dashboard-text-action" type="button" onClick={() => openNewsArticle(item)}>
+                          Baca selengkapnya <ArrowRight size={14} />
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="dashboard-empty-state"><span><Newspaper size={22} /></span><strong>Belum ada berita</strong><p>Pengumuman terbaru akan muncul di sini.</p></div>
+          ))}
         </section>
       )
     }
 
     if (activePage === 'knowledge-base') {
-      const visibleArticles = supportArticles.filter((article) => `${article.title} ${article.category}`.toLowerCase().includes(articleQuery.toLowerCase()))
+      const query = articleQuery.trim().toLowerCase()
+      const visibleCategories = kbCategories
+        .map((category) => {
+          const categoryMatch = query !== ''
+            && `${category.title} ${category.description ?? ''}`.toLowerCase().includes(query)
+          return {
+            ...category,
+            articles: category.articles.filter((article) =>
+              !query || categoryMatch || article.title.toLowerCase().includes(query)),
+          }
+        })
+        .filter((category) => query === ''
+          || category.articles.length > 0
+          || `${category.title} ${category.description ?? ''}`.toLowerCase().includes(query))
       return (
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">PANDUAN</span><h2>Pusat bantuan</h2><p>Temukan jawaban untuk pertanyaan seputar akun dan layanan.</p></div></div>
           <label className="dashboard-article-search"><Search size={16} /><input value={articleQuery} onChange={(event) => setArticleQuery(event.target.value)} placeholder="Cari artikel bantuan..." /></label>
-          <div className="dashboard-article-list">{visibleArticles.length ? visibleArticles.map((article) => (
-            <button className="dashboard-article-item" type="button" key={article.title} onClick={() => setNotice('Artikel bantuan akan tersedia setelah konten terhubung ke FossBilling.')}><span className="dashboard-article-icon"><BookOpen size={17} /></span><span><small>{article.category}</small><strong>{article.title}</strong><small>{article.readTime}</small></span><ChevronRight size={17} /></button>
-          )) : <div className="dashboard-table-empty">Tidak ada artikel yang cocok dengan pencarianmu.</div>}</div>
+          {kbState === 'loading' && <div className="dashboard-profile-loading" role="status">Memuat artikel...</div>}
+          {kbState === 'error' && (
+            <div className="dashboard-empty-state">
+              <span><BookOpen size={22} /></span>
+              <strong>{kbError}</strong>
+              <button className="dashboard-profile-retry" type="button" onClick={() => setKbLoadAttempt((attempt) => attempt + 1)}>Coba lagi</button>
+            </div>
+          )}
+          {kbState === 'loaded' && (visibleCategories.length ? (
+            <div className="dashboard-kb-grid">
+              {visibleCategories.map((category) => (
+                <article className="dashboard-kb-card" key={category.id}>
+                  <div className="dashboard-kb-card-head">
+                    <h3>{category.title}</h3>
+                    {category.description && <p>{category.description}</p>}
+                  </div>
+                  <div className="dashboard-kb-card-articles">
+                    {category.articles.length ? category.articles.map((article) => (
+                      <button className="dashboard-kb-article-link" type="button" key={article.id} onClick={() => openKbArticle(article)}>
+                        <BookOpen size={15} />
+                        <span>{article.title}</span>
+                        <ChevronRight size={15} />
+                      </button>
+                    )) : <span className="dashboard-kb-card-empty">Belum ada artikel.</span>}
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : <div className="dashboard-table-empty">Tidak ada artikel yang cocok dengan pencarianmu.</div>)}
         </section>
       )
     }
@@ -2485,17 +3134,29 @@ function ClientDashboardPage() {
           </section>
 
           <section className="dashboard-stat-grid" aria-label="Ringkasan akun">
-            <article className="dashboard-stat-card">
+            <article
+              className="dashboard-stat-card dashboard-stat-card-clickable"
+              role="button"
+              tabIndex={0}
+              onClick={() => openPage('services')}
+              onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openPage('services') } }}
+            >
               <span className="dashboard-stat-icon stat-icon-teal"><Cloud size={19} /></span>
               <span className="dashboard-stat-label">Layanan aktif</span>
-              <strong>2</strong>
-              <small><span className="stat-positive">Semua berjalan</span></small>
+              <strong>{serviceState === 'loaded' ? activeServiceOrders.length : '…'}</strong>
+              <small><span className="stat-positive">{activeServiceOrders.length > 0 ? 'Semua berjalan' : 'Belum ada layanan'}</span></small>
             </article>
-            <article className="dashboard-stat-card">
+            <article
+              className="dashboard-stat-card dashboard-stat-card-clickable"
+              role="button"
+              tabIndex={0}
+              onClick={() => openPage('invoices')}
+              onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openPage('invoices') } }}
+            >
               <span className="dashboard-stat-icon stat-icon-orange"><CreditCard size={19} /></span>
-              <span className="dashboard-stat-label">Tagihan terbuka</span>
-              <strong>Rp149.000</strong>
-              <small>Jatuh tempo 28 Okt 2026</small>
+              <span className="dashboard-stat-label">Tagihan Belum Dibayar</span>
+              <strong>{invoiceState === 'loaded' ? unpaidInvoiceCount : '…'}</strong>
+              <small>{nextUnpaidDueAt ? `Jatuh tempo ${formatInvoiceDate(nextUnpaidDueAt)}` : 'Tidak ada tagihan belum dibayar'}</small>
             </article>
             <article className="dashboard-stat-card">
               <span className="dashboard-stat-icon stat-icon-blue"><HardDrive size={19} /></span>
@@ -2512,7 +3173,50 @@ function ClientDashboardPage() {
               <button type="button" onClick={() => openPage('services')}>Lihat semua <ArrowRight size={15} /></button>
             </div>
             <div className="dashboard-services-grid">
-              {services.map((service) => (
+              {serviceState === 'loaded' ? (
+                activeServiceOrders.length === 0 ? (
+                  <p className="dashboard-table-empty">Belum ada layanan aktif.</p>
+                ) : activeServiceOrders.slice(0, 4).map((service) => {
+                  const currency = typeof service.currency === 'string' && /^[A-Za-z]{3}$/.test(service.currency)
+                    ? service.currency.toUpperCase()
+                    : 'IDR'
+                  const priceValue = service.total ?? service.price
+                  const priceLabel = priceValue !== null && priceValue !== undefined && priceValue !== '' && Number.isFinite(Number(priceValue))
+                    ? `${formatFullPrice(Number(priceValue), currency)}${servicePeriodLabel(service.period) ? ` / ${servicePeriodLabel(service.period)}` : ''}`
+                    : '-'
+                  return (
+                    <article
+                      className="dashboard-service-card dashboard-service-card-clickable"
+                      key={service.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => openPage('services')}
+                      onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openPage('services') } }}
+                    >
+                      <div className="dashboard-service-top">
+                        <span className="dashboard-service-icon"><Cloud size={20} /></span>
+                        <span className="dashboard-status status-active"><i /> Aktif</span>
+                      </div>
+                      <h3>{service.title}</h3>
+                      <p>{priceLabel}</p>
+                      <div className="dashboard-service-usage">
+                        <div><span>Perpanjangan</span><strong>{formatInvoiceDate(service.expires_at)}</strong></div>
+                        {service.storage?.quota && <div><span>Penyimpanan</span><strong>{service.storage.quota}</strong></div>}
+                        {storageSummary?.quota && typeof storageSummary.quota.used !== 'undefined' && (
+                          <div><span>Kuota terpakai</span><strong>{formatStorageBytes(storageSummary.quota.used)} <small>/ {storageSummary.quota.quota || '-'}</small></strong></div>
+                        )}
+                      </div>
+                      <div className="dashboard-service-footer">
+                        <span>Order <strong>#{service.id}</strong></span>
+                        <div className="dashboard-service-actions">
+                          {service.storage?.group && <button type="button" onClick={(event) => { event.stopPropagation(); handleOpenStorage() }}>Storage</button>}
+                          <button type="button" onClick={(event) => { event.stopPropagation(); openPage('services') }}>Kelola <ArrowRight size={14} /></button>
+                        </div>
+                      </div>
+                    </article>
+                  )
+                })
+              ) : services.map((service) => (
                 <article className="dashboard-service-card" key={service.name}>
                   <div className="dashboard-service-top">
                     <span className="dashboard-service-icon"><Cloud size={20} /></span>
@@ -2546,6 +3250,8 @@ function ClientDashboardPage() {
                     {(invoiceState === 'loaded'
                       ? invoiceRecords.slice(0, 3).map((invoice) => ({
                           id: invoice.number || `#${invoice.id}`,
+                          invoiceId: invoice.id,
+                          number: invoice.number,
                           date: formatInvoiceDate(invoice.created_at),
                           due: formatInvoiceDate(invoice.due_at),
                           amount: invoice.total === null || invoice.total === undefined
@@ -2560,7 +3266,7 @@ function ClientDashboardPage() {
                         <td>{invoice.date}</td>
                         <td className="invoice-amount">{invoice.amount}</td>
                         <td><span className={`dashboard-status ${invoiceStatusDisplay(invoice.status).tone}`}><i />{invoiceStatusDisplay(invoice.status).label}</span></td>
-                        <td><button type="button" className="invoice-download" aria-label={`Unduh ${invoice.id}`} onClick={() => setNotice('Unduh invoice akan tersedia setelah API FossBilling dihubungkan.')}><ArrowDownToLine size={16} /></button></td>
+                        <td><button type="button" className="invoice-download" aria-label={`Unduh ${invoice.id}`} disabled={isPdfDownloading} onClick={() => invoice.invoiceId ? downloadInvoicePdf(invoice.invoiceId, invoice.number) : setNotice('Unduh invoice akan tersedia setelah API FossBilling dihubungkan.')}><ArrowDownToLine size={16} /></button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -2590,6 +3296,38 @@ function ClientDashboardPage() {
           ) : renderMenuPage()}
           <footer className="dashboard-footer"><span>Ruang digital yang lebih personal.</span><span><FileText size={13} /> Privasi & keamanan adalah prioritas kami.</span></footer>
         </div>
+        {emailViewOpen && emailDetail.data && (
+          <div className="dashboard-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setEmailViewOpen(false) }}>
+            <div className="dashboard-modal dashboard-modal-wide" role="dialog" aria-modal="true" aria-labelledby="email-view-title" onKeyDown={(event) => { if (event.key === 'Escape') setEmailViewOpen(false) }}>
+              <div className="dashboard-modal-header">
+                <h3 id="email-view-title">{emailDetail.data.subject || '(Tanpa subjek)'}</h3>
+                <button type="button" onClick={() => setEmailViewOpen(false)} aria-label="Tutup"><X size={18} /></button>
+              </div>
+              <div className="dashboard-modal-body">
+                <p className="dashboard-powered-by">
+                  Dari {emailDetail.data.sender || '-'} · Kepada {emailDetail.data.recipients || '-'} · {formatEmailDate(emailDetail.data.created_at)}
+                </p>
+                {emailDetail.data.content_html ? (
+                  <iframe className="dashboard-email-frame dashboard-email-frame-large" sandbox="allow-same-origin allow-popups" srcDoc={emailDetail.data.content_html} title={emailDetail.data.subject || 'Isi email'} />
+                ) : (
+                  <div className="dashboard-email-text"><pre>{emailDetail.data.content_text || 'Tidak ada isi email.'}</pre></div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+        {emailDeleteTarget && (
+          <div className="dashboard-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !isEmailDeleting) setEmailDeleteTarget(null) }}>
+            <div className="dashboard-modal" role="dialog" aria-modal="true" aria-labelledby="email-delete-title" onKeyDown={(event) => { if (event.key === 'Escape' && !isEmailDeleting) setEmailDeleteTarget(null) }}>
+              <h3 id="email-delete-title">Hapus email?</h3>
+              <p>Email "{emailDeleteTarget.subject || '(Tanpa subjek)'}" akan dihapus dari riwayat dan tidak dapat dikembalikan.</p>
+              <div className="dashboard-modal-actions">
+                <button className="dashboard-outline-action" type="button" disabled={isEmailDeleting} onClick={() => setEmailDeleteTarget(null)}>Batal</button>
+                <button className="dashboard-danger-action" type="button" disabled={isEmailDeleting || emailBusyId !== ''} onClick={() => { setIsEmailDeleting(true); handleEmailAction('email-delete', emailDeleteTarget).finally(() => setIsEmailDeleting(false)) }}>{isEmailDeleting ? 'Menghapus...' : 'Ya, hapus'}</button>
+              </div>
+            </div>
+          </div>
+        )}
         {periodConflict && (
           <div className="dashboard-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPeriodConflict(null) }}>
             <div className="dashboard-modal" role="dialog" aria-modal="true" aria-labelledby="period-conflict-title">
@@ -2607,27 +3345,63 @@ function ClientDashboardPage() {
             </div>
           </div>
         )}
+        {kbArticleModal.article && (
+          <div className="dashboard-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setKbArticleModal({ status: 'idle', article: null, error: '' }) }}>
+            <div className="dashboard-modal dashboard-modal-wide" role="dialog" aria-modal="true" aria-labelledby="kb-article-title" onKeyDown={(event) => { if (event.key === 'Escape') setKbArticleModal({ status: 'idle', article: null, error: '' }) }}>
+              <div className="dashboard-modal-header">
+                <h3 id="kb-article-title">Pusat Bantuan</h3>
+                <button type="button" onClick={() => setKbArticleModal({ status: 'idle', article: null, error: '' })} aria-label="Tutup"><X size={18} /></button>
+              </div>
+              <div className="dashboard-modal-body">
+                {kbArticleModal.status === 'loading' && <div className="dashboard-profile-loading" role="status">Memuat artikel...</div>}
+                {kbArticleModal.status === 'error' && (
+                  <div className="dashboard-empty-state">
+                    <span><BookOpen size={22} /></span>
+                    <strong>{kbArticleModal.error}</strong>
+                    <button className="dashboard-profile-retry" type="button" onClick={() => openKbArticle(kbArticleModal.article)}>Coba lagi</button>
+                  </div>
+                )}
+                {kbArticleModal.status === 'loaded' && (
+                  <article className="dashboard-kb-article">
+                    {kbArticleModal.article.category?.title && (
+                      <span className="dashboard-kb-category">{kbArticleModal.article.category.title}</span>
+                    )}
+                    <h1 className="dashboard-kb-title">{kbArticleModal.article.title}</h1>
+                    {kbArticleHtml ? (
+                      <div className="dashboard-kb-content" dangerouslySetInnerHTML={{ __html: kbArticleHtml }} />
+                    ) : (
+                      <p className="dashboard-kb-content">Artikel ini belum memiliki konten.</p>
+                    )}
+                  </article>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
         {ticketModalOpen && (
-          <div className="dashboard-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setTicketModalOpen(false) }}>
+          <div className="dashboard-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setTicketRelOrder(null); setTicketModalOpen(false) } }}>
             <form
               className="dashboard-modal"
               role="dialog"
               aria-modal="true"
               aria-labelledby="ticket-modal-title"
-              onKeyDown={(event) => { if (event.key === 'Escape') setTicketModalOpen(false) }}
+              onKeyDown={(event) => { if (event.key === 'Escape') { setTicketRelOrder(null); setTicketModalOpen(false) } }}
               onSubmit={handleTicketCreate}
             >
               <div className="dashboard-modal-header">
                 <h3 id="ticket-modal-title">Buat tiket baru</h3>
-                <button type="button" onClick={() => setTicketModalOpen(false)} aria-label="Tutup"><X size={18} /></button>
+                <button type="button" onClick={() => { setTicketRelOrder(null); setTicketModalOpen(false) }} aria-label="Tutup"><X size={18} /></button>
               </div>
               <div className="dashboard-modal-body">
+                {ticketRelOrder && (
+                  <p className="dashboard-ticket-rel-note">Tiket akan terhubung ke order <strong>#{ticketRelOrder.id} — {ticketRelOrder.title}</strong>.</p>
+                )}
                 <label className="dashboard-profile-field"><span>Helpdesk</span><select name="support_helpdesk_id" disabled={helpdeskState === 'loading'}>
                   {helpdeskState === 'loading' && <option>Memuat...</option>}
                   {helpdeskState === 'error' && <option value="">Helpdesk tidak dapat dimuat</option>}
                   {helpdesks.map((helpdesk) => <option key={helpdesk.value} value={helpdesk.value}>{helpdesk.label}</option>)}
                 </select></label>
-                <label className="dashboard-profile-field"><span>Subjek <b>*</b></span><input name="subject" type="text" required autoFocus /></label>
+                <label className="dashboard-profile-field"><span>Subjek <b>*</b></span><input name="subject" type="text" required autoFocus defaultValue={ticketRelOrder ? `Order #${ticketRelOrder.id} — ${ticketRelOrder.title}` : ''} /></label>
                 <label className="dashboard-profile-field"><span>Pesan <b>*</b></span><textarea name="message" rows={6} required /></label>
               </div>
               <div className="dashboard-modal-footer">
