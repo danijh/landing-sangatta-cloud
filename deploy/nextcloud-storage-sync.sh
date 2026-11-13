@@ -1,123 +1,287 @@
 #!/usr/bin/env bash
-# Provisioning Storage Area (bucket per user, privasi penuh + lifecycle expiry).
+# Provisioning Storage Area multi-provider (bucket per user, privasi penuh).
 #
-# Jalankan sebagai www-data di host Nextcloud, misalnya:
+# Jalankan sebagai www-data di host Nextcloud:
 #   sudo -u www-data /path/website-2/deploy/nextcloud-storage-sync.sh /path/website-2/storage
 #
 # Input:
 #   <storage-dir>/nextcloud-mounts.json — ditulis otomatis backend website:
-#     {"s3": {...},
+#     {"s3": {...legacy...},
+#      "providers": {"<nama>": {"type": "s3-admin|cloudflare|b2", "s3": {...}, ...}},
+#      "managed_groups": [...],
 #      "users": {"fb_1": {
-#          "mounts":              [{name, group, bucket, credentials_key, expires_at}],
-#          "retained_buckets":    ["bucket-lain"],   // expired, masih dalam grace period
-#          "decommission_buckets":["bucket-lama"]    // grace habis → dihapus
+#          "mounts":              [{name, group, bucket, provider, credentials_key, expires_at}],
+#          "retained_buckets":    [{bucket, provider} | "bucket-lama"],
+#          "decommission_buckets":[{bucket, provider} | "bucket-lama"],
+#          "groups": [...], "home_quota": "10 MB"
 #      }}}
-#   <storage-dir>/s3-credentials.json — access key MinIO per user (diisi otomatis)
+#   <storage-dir>/s3-credentials.json — access key per user per provider
 #
-# Yang dilakukan:
-#   1. mc mb untuk bucket mounts + retained; mc rb --force untuk decommission.
-#   2. MinIO user + policy per user NC (hanya bucket aktif yang di-mount).
-#   3. occ defaultapp=files.
-#   4. occ files_external:create per mount; mount amazons3 user yang tidak ada
-#      lagi di spec akan DIHAPUS (pencabutan saat paket expired).
-#   5. occ group:add/adduser/removeuser + user:setting quota — sinkronisasi
-#      grup produk & kuota home (Provisioning API write diblokir NC35).
+# Provider type:
+#   s3-admin   — MinIO/RustFS: mc alias + mc admin user/policy
+#                (env admin: MINIO_ROOT_USER / MINIO_ROOT_PASSWORD,
+#                 atau admin_user_env/admin_pass_env di config provider)
+#   cloudflare — Cloudflare R2: bucket & token via Cloudflare API
+#                (env: CLOUDFLARE_API_TOKEN, R2_ACCOUNT_ID)
+#   b2         — Backblaze B2: native B2 API
+#                (env: B2_KEY_ID, B2_APP_KEY, opsional B2_API_URL)
 #
 # Environment opsional:
-#   NC_DIR, MC, MINIO_ALIAS, MINIO_ENDPOINT,
-#   MINIO_ROOT_USER / MINIO_ROOT_PASSWORD (alias sementara dibuat otomatis)
+#   NC_DIR, MC, PROVIDER_PHP, MINIO_ENDPOINT
 
 set -euo pipefail
 
-STORAGE_DIR="${1:?Usage: $0 <website-storage-dir>}"
+STORAGE_DIR="$(cd "${1:?Usage: $0 <website-storage-dir>}" && pwd)"
 NC_DIR="${NC_DIR:-/var/www/nextcloud}"
 MC="${MC:-mc}"
-MINIO_ALIAS="${MINIO_ALIAS:-minio}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROVIDER_PHP="${PROVIDER_PHP:-$SCRIPT_DIR/storage-provider.php}"
 SPEC="$STORAGE_DIR/nextcloud-mounts.json"
 CREDS="$STORAGE_DIR/s3-credentials.json"
+WORK="$(mktemp -d)"
+MC_CFG=""
+
+cleanup() { rm -rf "$WORK" ${MC_CFG:+"$MC_CFG"}; }
+trap cleanup EXIT
 
 [ -f "$SPEC" ] || { echo "Spec tidak ditemukan: $SPEC"; exit 1; }
 command -v php >/dev/null || { echo "php CLI dibutuhkan"; exit 1; }
 command -v "$MC" >/dev/null || { echo "mc (MinIO client) tidak ditemukan: $MC"; exit 1; }
-
-TMP_USERS=""; TMP_BUCKETS=""; TMP_GROUPS=""
-MC_CFG=""
-if [ -n "${MINIO_ROOT_USER:-}" ] && [ -n "${MINIO_ROOT_PASSWORD:-}" ]; then
-    MC_CFG="$(mktemp -d)"
-    trap 'rm -rf "$MC_CFG"; rm -f "$TMP_USERS" "$TMP_BUCKETS" "$TMP_GROUPS"' EXIT
-    MC=("$MC" --config-dir "$MC_CFG")
-    "${MC[@]}" alias set "$MINIO_ALIAS" "${MINIO_ENDPOINT:-http://localhost:9000}" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
-else
-    trap 'rm -f "$TMP_USERS" "$TMP_BUCKETS" "$TMP_GROUPS"' EXIT
-fi
-
-S3_JSON="$(php -r '$s=json_decode(file_get_contents($argv[1]),true); echo json_encode($s["s3"] ?? []);' "$SPEC")"
-S3_HOST="$(php -r 'echo json_decode($argv[1],true)["hostname"] ?? "localhost:9000";' "$S3_JSON")"
-S3_SSL="$(php -r 'echo !empty(json_decode($argv[1],true)["use_ssl"]) ? "1" : "0";' "$S3_JSON")"
-S3_REGION="$(php -r 'echo json_decode($argv[1],true)["region"] ?? "us-east-1";' "$S3_JSON")"
-S3_PATH_STYLE="$(php -r 'echo !empty(json_decode($argv[1],true)["use_path_style"]) ? "1" : "0";' "$S3_JSON")"
-[ "$S3_SSL" = "1" ] && S3_SCHEME="https" || S3_SCHEME="http"
-S3_PORT="$(printf '%s' "$S3_HOST" | sed -n 's/.*:\([0-9]*\)$/\1/p')"
-[ -n "$S3_PORT" ] || S3_PORT=$([ "$S3_SSL" = "1" ] && echo 443 || echo 80)
-S3_HOSTNAME="$(printf '%s' "$S3_HOST" | sed 's/:[0-9]*$//')"
-
 [ -f "$CREDS" ] || echo '{}' > "$CREDS"
 
-TMP_USERS="$(mktemp)"
-# format baris:
-#   user|bucket1,bucket2        → user summary (semua bucket aktif+retained)
-#   user|DECOM|bucket           → bucket yang harus dihapus
-#   user⇥name⇥bucket⇥credkey    → detail mount aktif
+# Normalisasi spec → file kerja per jenis data
 php -r '
     $spec = json_decode(file_get_contents($argv[1]), true);
-    foreach (($spec["users"] ?? []) as $user => $entry) {
-        if (!is_array($entry)) { $entry = ["mounts" => $entry]; } // kompat format lama
-        $mounts = is_array($entry["mounts"] ?? null) ? $entry["mounts"] : [];
-        $retained = is_array($entry["retained_buckets"] ?? null) ? $entry["retained_buckets"] : [];
-        $decom = is_array($entry["decommission_buckets"] ?? null) ? $entry["decommission_buckets"] : [];
+    $w = $argv[2];
 
-        $keep = [];
-        foreach ($mounts as $m) { if (is_array($m) && !empty($m["bucket"])) $keep[$m["bucket"]] = 1; }
-        foreach ($retained as $b) { if (is_string($b) && $b !== "") $keep[$b] = 1; }
-        echo $user, "|", implode(",", array_keys($keep)), "\n";
-        foreach ($decom as $b) { if (is_string($b) && $b !== "") echo $user, "|DECOM|", $b, "\n"; }
-        foreach ($mounts as $m) {
-            if (!is_array($m) || empty($m["bucket"])) continue;
-            echo $user, "\t", $m["name"] ?? $m["bucket"], "\t", $m["bucket"], "\t", $m["credentials_key"] ?? $user, "\n";
+    $providers = $spec["providers"] ?? [];
+    if (!is_array($providers) || $providers === []) {
+        $providers = ["default" => ["type" => "s3-admin", "s3" => $spec["s3"] ?? []]];
+    }
+    file_put_contents("$w/providers.json", json_encode($providers));
+
+    $norm = function ($x) {
+        if (is_string($x)) { return ["bucket" => $x, "provider" => "default"]; }
+        if (is_array($x)) {
+            return ["bucket" => (string) ($x["bucket"] ?? ""),
+                    "provider" => (string) ($x["provider"] ?? "default")];
+        }
+        return null;
+    };
+
+    $buckets = fopen("$w/buckets.tsv", "w");
+    $mounts  = fopen("$w/mounts.tsv", "w");
+    $creds   = fopen("$w/creds.tsv", "w");
+    $groups  = fopen("$w/groups.tsv", "w");
+    $users   = fopen("$w/users.txt", "w");
+
+    foreach (($spec["users"] ?? []) as $u => $e) {
+        fwrite($users, "$u\n");
+        if (!is_array($e)) { continue; }
+        $mList = is_array($e["mounts"] ?? null) ? $e["mounts"] : [];
+        foreach ($mList as $m) {
+            if (!is_array($m) || empty($m["bucket"])) { continue; }
+            $p = (string) ($m["provider"] ?? "default");
+            fwrite($buckets, "KEEP\t$p\t" . $m["bucket"] . "\n");
+            fwrite($mounts, "MOUNT\t$u\t" . ($m["name"] ?? $m["bucket"]) . "\t"
+                . $m["bucket"] . "\t$p\t" . ($m["credentials_key"] ?? $u) . "\n");
+        }
+        foreach ((array) ($e["retained_buckets"] ?? []) as $r) {
+            $n = $norm($r);
+            if ($n && $n["bucket"] !== "") { fwrite($buckets, "KEEP\t{$n["provider"]}\t{$n["bucket"]}\n"); }
+        }
+        foreach ((array) ($e["decommission_buckets"] ?? []) as $d) {
+            $n = $norm($d);
+            if ($n && $n["bucket"] !== "") { fwrite($buckets, "DECOM\t{$n["provider"]}\t{$n["bucket"]}\n"); }
+        }
+        $byProv = [];
+        foreach ($mList as $m) {
+            if (!is_array($m) || empty($m["bucket"])) { continue; }
+            $byProv[(string) ($m["provider"] ?? "default")][] = $m["bucket"];
+        }
+        foreach ($byProv as $p => $bs) {
+            fwrite($creds, "CREDS\t$u\t$p\t" . implode(",", array_unique($bs)) . "\n");
         }
     }
-' "$SPEC" > "$TMP_USERS"
 
-BUCKET_LIST="$(grep '|' "$TMP_USERS" | grep -v '|DECOM|' | cut -d'|' -f2 | tr ',' '\n' | grep -v '^$' | sort -u || true)"
-DECOM_LIST="$(grep '|DECOM|' "$TMP_USERS" | cut -d'|' -f3 | sort -u || true)"
+    $managed = array_map("strval", (array) ($spec["managed_groups"] ?? []));
+    fwrite($groups, "MANAGED\t" . implode(",", $managed) . "\n");
+    foreach (($spec["users"] ?? []) as $u => $e) {
+        if (!is_array($e)) { continue; }
+        $hasGroups = isset($e["groups"]) && is_array($e["groups"]);
+        $hasQuota = isset($e["home_quota"]) && is_string($e["home_quota"]) && $e["home_quota"] !== "";
+        if (!$hasGroups && !$hasQuota) { continue; }
+        $g = $hasGroups ? implode(",", array_map("strval", $e["groups"])) : "";
+        $q = $hasQuota ? $e["home_quota"] : "";
+        fwrite($groups, "USER\t$u\t$g\t$q\n");
+    }
+    fclose($buckets); fclose($mounts); fclose($creds); fclose($groups); fclose($users);
+' "$SPEC" "$WORK"
 
-# --- 1a. hapus bucket decommission ---
-for bucket in $DECOM_LIST; do
-    if "${MC[@]}" ls "$MINIO_ALIAS/$bucket" >/dev/null 2>&1; then
-        "${MC[@]}" rb --force "$MINIO_ALIAS/$bucket" && echo "bucket $bucket dihapus (grace habis)" \
-            || echo "   GAGAL menghapus bucket $bucket"
-    else
-        echo "bucket $bucket sudah tidak ada"
+# Helper: ambil field dari providers.json
+prov_json() { # $1=provider → cetak JSON provider tsb
+    php -r '$p=json_decode(file_get_contents($argv[1]),true); echo json_encode($p[$argv[2]]??[]);' \
+        "$WORK/providers.json" "$1"
+}
+prov_type() { prov_json "$1" | php -r '$p=json_decode(stream_get_contents(STDIN),true); echo $p["type"]??"s3-admin";'; }
+prov_s3_field() { # $1=provider $2=field (hostname|region|use_ssl|use_path_style)
+    prov_json "$1" | php -r '$p=json_decode(stream_get_contents(STDIN),true); $s=$p["s3"]??[]; echo $s[$argv[1]]??"";' "$2"
+}
+# port diturunkan dari hostname seperti sebelumnya
+prov_endpoint() { # $1=provider → "scheme://host" untuk mc alias
+    local host ssl port
+    host="$(prov_s3_field "$1" hostname)"
+    ssl="$(prov_s3_field "$1" use_ssl)"
+    [ "$ssl" = "1" ] || [ "$ssl" = "true" ] && scheme="https" || scheme="http"
+    port="$(printf '%s' "$host" | sed -n 's/.*:\([0-9]*\)$/\1/p')"
+    [ -n "$port" ] || port=$([ "$scheme" = "https" ] && echo 443 || echo 80)
+    host="$(printf '%s' "$host" | sed 's/:[0-9]*$//')"
+    echo "$scheme://$host:$port"
+}
+prov_admin_env() { # $1=provider $2=field (user|pass) → nama env var
+    local def_user="MINIO_ROOT_USER" def_pass="MINIO_ROOT_PASSWORD"
+    prov_json "$1" | php -r '$p=json_decode(stream_get_contents(STDIN),true); echo $p[$argv[1]]??"";' \
+        "admin_${2}_env" | { read -r v; echo "${v:-$([ "$2" = user ] && echo $def_user || echo $def_pass)}"; }
+}
+
+# mc butuh config-dir writable — www-data tidak punya home config.
+MC_CFG="$(mktemp -d)"
+chmod 700 "$MC_CFG"
+MC=("$MC" --config-dir "$MC_CFG")
+
+# mc alias per provider s3-admin: pv-<name>
+declare -A MC_ALIAS=()
+for prov in $(php -r '$p=json_decode(file_get_contents($argv[1]),true); echo implode("\n",array_keys($p));' "$WORK/providers.json"); do
+    [ "$(prov_type "$prov")" = "s3-admin" ] || continue
+    alias_name="pv-$prov"
+    endpoint="$(prov_endpoint "$prov")"
+    user_env="$(prov_admin_env "$prov" user)"; pass_env="$(prov_admin_env "$prov" pass)"
+    user_val="${!user_env:-}"; pass_val="${!pass_env:-}"
+    if [ -z "$user_val" ] || [ -z "$pass_val" ]; then
+        echo "   !! provider $prov: env $user_env/$pass_env kosong — bucket via mc dilewati"
+        continue
     fi
+    "${MC[@]}" alias set "$alias_name" "$endpoint" "$user_val" "$pass_val" >/dev/null 2>&1 \
+        && MC_ALIAS[$prov]="$alias_name" \
+        || echo "   !! gagal set mc alias $alias_name ($endpoint)"
 done
 
-# --- 1b. buat bucket yang dibutuhkan ---
-for bucket in $BUCKET_LIST; do
-    if "${MC[@]}" ls "$MINIO_ALIAS/$bucket" >/dev/null 2>&1; then
-        echo "bucket $bucket sudah ada"
-    else
-        "${MC[@]}" mb "$MINIO_ALIAS/$bucket" && echo "bucket $bucket dibuat"
-    fi
-done
+# --- 1. bucket: decommission dulu, lalu keep ---
+sort -u "$WORK/buckets.tsv" > "$WORK/buckets-sorted.tsv"
+while IFS=$'\t' read -r ACTION PROVIDER BUCKET; do
+    [ -n "${BUCKET:-}" ] || continue
+    ptype="$(prov_type "$PROVIDER")"
+    case "$ptype" in
+        cloudflare|b2)
+            if [ "$ACTION" = "DECOM" ]; then
+                php "$PROVIDER_PHP" "$SPEC" "$PROVIDER" remove-bucket "$BUCKET" >/dev/null 2>&1 \
+                    && echo "bucket $BUCKET ($PROVIDER) dihapus (grace habis)" \
+                    || echo "   GAGAL menghapus bucket $BUCKET ($PROVIDER)"
+            else
+                php "$PROVIDER_PHP" "$SPEC" "$PROVIDER" ensure-bucket "$BUCKET" >/dev/null 2>&1 \
+                    && echo "bucket $BUCKET ($PROVIDER) siap" \
+                    || echo "   GAGAL menyiapkan bucket $BUCKET ($PROVIDER)"
+            fi
+            ;;
+        *)
+            alias_name="${MC_ALIAS[$PROVIDER]:-}"
+            [ -n "$alias_name" ] || { echo "   !! skip bucket $BUCKET ($PROVIDER): tidak ada mc alias"; continue; }
+            if [ "$ACTION" = "DECOM" ]; then
+                if "${MC[@]}" ls "$alias_name/$BUCKET" >/dev/null 2>&1; then
+                    "${MC[@]}" rb --force "$alias_name/$BUCKET" >/dev/null 2>&1 \
+                        && echo "bucket $BUCKET ($PROVIDER) dihapus (grace habis)" \
+                        || echo "   GAGAL menghapus bucket $BUCKET ($PROVIDER)"
+                else
+                    echo "bucket $BUCKET ($PROVIDER) sudah tidak ada"
+                fi
+            else
+                if "${MC[@]}" ls "$alias_name/$BUCKET" >/dev/null 2>&1; then
+                    echo "bucket $BUCKET ($PROVIDER) sudah ada"
+                else
+                    "${MC[@]}" mb "$alias_name/$BUCKET" >/dev/null 2>&1 \
+                        && echo "bucket $BUCKET ($PROVIDER) dibuat" \
+                        || echo "   GAGAL membuat bucket $BUCKET ($PROVIDER)"
+                fi
+            fi
+            ;;
+    esac
+done < "$WORK/buckets-sorted.tsv"
 
-# --- 2. user minio + policy per user NC ---
-grep '|' "$TMP_USERS" | grep -v '|DECOM|' | cut -d'|' -f1 | sort -u | while read -r NC_USER; do
+# --- 2. kredensial per user × provider ---
+# himpunan aktif user|provider
+ACTIVE_UP="$(awk -F'\t' '$1=="CREDS"{print $2"|"$3}' "$WORK/creds.tsv" | sort -u)"
+
+creds_get() { # $1=user $2=provider $3=field → access_key|secret_key (fallback minio/default/legacy)
+    php -r '
+        $c=json_decode(file_get_contents($argv[1]),true);
+        $u=$argv[2]; $p=$argv[3]; $f=$argv[4];
+        $e=$c[$u][$p] ?? $c[$u]["minio"] ?? $c[$u]["default"] ?? null;
+        if (!is_array($e) || !isset($e[$f])) {
+            // legacy flat {user:{access_key,secret_key}} — hanya untuk provider minio/default
+            if (in_array($p, ["minio","default","s3-admin"], true)) { $e=$c[$u] ?? null; }
+        }
+        echo is_array($e) ? ($e[$f] ?? "") : "";
+    ' "$CREDS" "$1" "$2" "$3"
+}
+
+# 2a. provider non-s3-admin: ensure/revoke via helper PHP
+while IFS=$'\t' read -r _ NC_USER PROVIDER BUCKETS_CSV; do
+    [ -n "${NC_USER:-}" ] || continue
+    ptype="$(prov_type "$PROVIDER")"
+    case "$ptype" in
+        cloudflare|b2)
+            out="$(php "$PROVIDER_PHP" "$SPEC" "$PROVIDER" ensure-credentials "$NC_USER" "$BUCKETS_CSV" 2>&1)" \
+                && echo "   kredensial $NC_USER/$PROVIDER siap" \
+                || echo "   GAGAL kredensial $NC_USER/$PROVIDER: $out"
+            ;;
+    esac
+done < "$WORK/creds.tsv"
+
+# 2b. revoke: user|provider di creds file tapi tidak aktif
+php -r '
+    $c=json_decode(file_get_contents($argv[1]),true)?:[];
+    $active=array_flip(explode("\n",trim($argv[2])));
+    foreach($c as $u=>$provs){
+        if(!is_array($provs)) continue;
+        foreach($provs as $p=>$e){
+            if(is_array($e) && !isset($active[$u."|".$p])) echo "$u\t$p\n";
+        }
+        // legacy flat entry
+        if(isset($provs["access_key"]) && !isset($active[$u."|minio"]) && !isset($active[$u."|default"])){
+            echo "$u\tminio\n";
+        }
+    }
+' "$CREDS" "$ACTIVE_UP" | while IFS=$'\t' read -r NC_USER PROVIDER; do
     [ -n "$NC_USER" ] || continue
-    MOUNT_USER="${NC_USER//_/-}"
-    # hanya bucket dengan mount aktif (bukan retained) yang masuk policy
-    ACTIVE_BUCKETS="$(awk -F'\t' -v u="$NC_USER" '$1==u {print $3}' "$TMP_USERS" | sort -u | tr '\n' ' ')"
+    ptype="$(prov_type "$PROVIDER")"
+    case "$ptype" in
+        cloudflare|b2)
+            php "$PROVIDER_PHP" "$SPEC" "$PROVIDER" revoke-credentials "$NC_USER" >/dev/null 2>&1 \
+                && echo "   akses $NC_USER/$PROVIDER dicabut" || true
+            ;;
+        *)
+            alias_name="${MC_ALIAS[$PROVIDER]:-}"
+            [ -n "$alias_name" ] || continue
+            AK="$(creds_get "$NC_USER" "$PROVIDER" access_key)"
+            [ -n "$AK" ] || continue
+            "${MC[@]}" admin policy detach "$alias_name" "$NC_USER-$PROVIDER-policy" --user "$AK" >/dev/null 2>&1 || true
+            "${MC[@]}" admin policy remove "$alias_name" "$NC_USER-$PROVIDER-policy" >/dev/null 2>&1 || true
+            "${MC[@]}" admin user remove "$alias_name" "$AK" >/dev/null 2>&1 || true
+            echo "   akses minio $NC_USER/$PROVIDER dicabut (tidak ada paket aktif)"
+            ;;
+    esac
+done
 
-    # policy JSON (kosong → tidak dipasang)
+# 2c. s3-admin: pastikan user minio + policy untuk CREDS aktif
+while IFS=$'\t' read -r _ NC_USER PROVIDER BUCKETS_CSV; do
+    [ -n "${NC_USER:-}" ] || continue
+    [ "$(prov_type "$PROVIDER")" = "s3-admin" ] || continue
+    alias_name="${MC_ALIAS[$PROVIDER]:-}"
+    [ -n "$alias_name" ] || { echo "   !! skip creds $NC_USER/$PROVIDER: tidak ada mc alias"; continue; }
+
+    # hanya bucket dengan mount aktif yang masuk policy
+    ACTIVE_BUCKETS="$(awk -F'\t' -v u="$NC_USER" -v p="$PROVIDER" '$1=="MOUNT" && $2==u && $5==p {print $4}' "$WORK/mounts.tsv" | sort -u | tr '\n' ' ')"
+
     POLICY_JSON="$(mktemp)"
     php -r '
         $buckets = array_filter(explode(" ", $argv[1]));
@@ -137,106 +301,166 @@ grep '|' "$TMP_USERS" | grep -v '|DECOM|' | cut -d'|' -f1 | sort -u | while read
             ]],
         ], JSON_PRETTY_PRINT);
     ' "$ACTIVE_BUCKETS" > "$POLICY_JSON"
-
     HAS_POLICY="$(php -r '$p=json_decode(file_get_contents($argv[1]),true); echo empty($p["Statement"] ?? null) ? "0" : "1";' "$POLICY_JSON")"
 
-    # kredensial
-    CREDS_JSON="$(php -r '$c=json_decode(file_get_contents($argv[1]),true); echo json_encode($c[$argv[2]] ?? null);' "$CREDS" "$NC_USER")"
-    ACCESS_KEY=""; SECRET_KEY=""
-    if [ "$CREDS_JSON" != "null" ]; then
-        ACCESS_KEY="$(php -r '$c=json_decode($argv[1],true); echo $c["access_key"];' "$CREDS_JSON")"
-        SECRET_KEY="$(php -r '$c=json_decode($argv[1],true); echo $c["secret_key"];' "$CREDS_JSON")"
-    fi
+    ACCESS_KEY="$(creds_get "$NC_USER" "$PROVIDER" access_key)"
+    SECRET_KEY="$(creds_get "$NC_USER" "$PROVIDER" secret_key)"
 
-    # pastikan user minio ada (buat ulang dari kredensial tersimpan bila perlu)
-    if ! "${MC[@]}" admin user info "$MINIO_ALIAS" "$ACCESS_KEY" >/dev/null 2>&1; then
+    if ! "${MC[@]}" admin user info "$alias_name" "$ACCESS_KEY" >/dev/null 2>&1; then
         if [ -z "$ACCESS_KEY" ]; then
+            MOUNT_USER="${NC_USER//_/-}"
             ACCESS_KEY="$MOUNT_USER-$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
             SECRET_KEY="$(head -c24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
         fi
-        if "${MC[@]}" admin user add "$MINIO_ALIAS" "$ACCESS_KEY" "$SECRET_KEY" >/dev/null 2>&1; then
+        if "${MC[@]}" admin user add "$alias_name" "$ACCESS_KEY" "$SECRET_KEY" >/dev/null 2>&1; then
             php -r '
-                $f=$argv[1]; $u=$argv[2]; $ak=$argv[3]; $sk=$argv[4];
+                $f=$argv[1]; $u=$argv[2]; $p=$argv[3]; $ak=$argv[4]; $sk=$argv[5];
                 $c=is_file($f)?json_decode(file_get_contents($f),true):[];
-                $c[$u]=["access_key"=>$ak,"secret_key"=>$sk];
+                $c[$u][$p]=["access_key"=>$ak,"secret_key"=>$sk];
                 file_put_contents($f, json_encode($c, JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES));
-            ' "$CREDS" "$NC_USER" "$ACCESS_KEY" "$SECRET_KEY"
-            echo "   minio user $ACCESS_KEY dibuat untuk $NC_USER"
+            ' "$CREDS" "$NC_USER" "$PROVIDER" "$ACCESS_KEY" "$SECRET_KEY"
+            echo "   minio user $ACCESS_KEY dibuat untuk $NC_USER/$PROVIDER"
         else
-            echo "   GAGAL: minio user add $ACCESS_KEY untuk $NC_USER"
+            echo "   GAGAL: minio user add $ACCESS_KEY untuk $NC_USER/$PROVIDER"
             rm -f "$POLICY_JSON"; continue
         fi
     fi
 
-    POLICY_NAME="$MOUNT_USER-policy"
+    POLICY_NAME="$NC_USER-$PROVIDER-policy"
     if [ "$HAS_POLICY" = "0" ]; then
-        # tidak ada bucket aktif → copot policy & user minio
-        "${MC[@]}" admin policy detach "$MINIO_ALIAS" "$POLICY_NAME" --user "$ACCESS_KEY" >/dev/null 2>&1 || true
-        "${MC[@]}" admin policy remove "$MINIO_ALIAS" "$POLICY_NAME" >/dev/null 2>&1 || true
-        "${MC[@]}" admin user remove "$MINIO_ALIAS" "$ACCESS_KEY" >/dev/null 2>&1 || true
-        echo "   akses minio $NC_USER dicabut (tidak ada paket aktif)"
+        "${MC[@]}" admin policy detach "$alias_name" "$POLICY_NAME" --user "$ACCESS_KEY" >/dev/null 2>&1 || true
+        "${MC[@]}" admin policy remove "$alias_name" "$POLICY_NAME" >/dev/null 2>&1 || true
+        "${MC[@]}" admin user remove "$alias_name" "$ACCESS_KEY" >/dev/null 2>&1 || true
+        echo "   akses $NC_USER/$PROVIDER dicabut (tidak ada bucket aktif)"
         rm -f "$POLICY_JSON"; continue
     fi
 
-    if "${MC[@]}" admin policy info "$MINIO_ALIAS" "$POLICY_NAME" >/dev/null 2>&1; then
-        "${MC[@]}" admin policy detach "$MINIO_ALIAS" "$POLICY_NAME" --user "$ACCESS_KEY" >/dev/null 2>&1 || true
-        "${MC[@]}" admin policy remove "$MINIO_ALIAS" "$POLICY_NAME" >/dev/null \
+    if "${MC[@]}" admin policy info "$alias_name" "$POLICY_NAME" >/dev/null 2>&1; then
+        "${MC[@]}" admin policy detach "$alias_name" "$POLICY_NAME" --user "$ACCESS_KEY" >/dev/null 2>&1 || true
+        "${MC[@]}" admin policy remove "$alias_name" "$POLICY_NAME" >/dev/null \
             || { echo "   GAGAL: policy remove $POLICY_NAME"; rm -f "$POLICY_JSON"; continue; }
     fi
-    "${MC[@]}" admin policy create "$MINIO_ALIAS" "$POLICY_NAME" "$POLICY_JSON" >/dev/null \
+    "${MC[@]}" admin policy create "$alias_name" "$POLICY_NAME" "$POLICY_JSON" >/dev/null \
         || { echo "   GAGAL: policy create $POLICY_NAME"; rm -f "$POLICY_JSON"; continue; }
-    "${MC[@]}" admin policy attach "$MINIO_ALIAS" "$POLICY_NAME" --user "$ACCESS_KEY" >/dev/null \
+    "${MC[@]}" admin policy attach "$alias_name" "$POLICY_NAME" --user "$ACCESS_KEY" >/dev/null \
         || { echo "   GAGAL: policy attach $POLICY_NAME"; rm -f "$POLICY_JSON"; continue; }
     rm -f "$POLICY_JSON"
-    echo "   policy $POLICY_NAME terpasang untuk $NC_USER"
-done
+    echo "   policy $POLICY_NAME terpasang untuk $NC_USER/$PROVIDER"
+done < "$WORK/creds.tsv"
 
 # --- 3. mount Nextcloud ---
 cd "$NC_DIR"
 OCC="php occ"
 $OCC config:system:set defaultapp --value=files >/dev/null 2>&1 || true
 
-# --- 3a. cabut mount milik user yang tidak ada lagi di spec ---
-# user list = field1 dari baris summary (ada untuk semua user di spec)
-grep '|' "$TMP_USERS" | grep -v '|DECOM|' | cut -d'|' -f1 | sort -u | while read -r NC_USER; do
+# --- 3a. cabut mount yang tidak lagi diinginkan / salah provider ---
+# Signature mount: mount_point|bucket|hostname|port
+# Iterasi SEMUA user di spec — user tanpa mount aktif kehilangan semua mount S3.
+sort -u "$WORK/users.txt" | while read -r NC_USER; do
     [ -n "$NC_USER" ] || continue
-    DESIRED="$(awk -F'\t' -v u="$NC_USER" '$1==u {print "/" $2}' "$TMP_USERS" | sort -u)"
-    EXISTING="$(php -r '
-        $out = shell_exec("php occ files_external:list --output=json " . escapeshellarg($argv[1]) . " 2>/dev/null");
-        $rows = json_decode((string)$out, true);
-        $desired = array_flip(array_filter(explode("\n", $argv[2])));
-        foreach ((array)$rows as $r) {
-            $cls = (string)($r["storage"] ?? "");
-            if (stripos($cls, "S3") === false) continue;
-            $mp = $r["mount_point"] ?? "";
-            if (!isset($desired[$mp])) echo $r["mount_id"], "\n";
-        }
-    ' "$NC_USER" "$DESIRED" 2>/dev/null || true)"
-    for mid in $EXISTING; do
-        [ -n "$mid" ] || continue
-        $OCC files_external:delete "$mid" --yes >/dev/null 2>&1 \
-            && echo "   mount id=$mid dicabut dari $NC_USER (paket tidak aktif)" \
-            || echo "   GAGAL mencabut mount id=$mid"
-    done
-done
-
-# --- 3b. buat mount yang diinginkan ---
-awk -F'\t' 'NF==4' "$TMP_USERS" | while IFS=$'\t' read -r NC_USER MOUNT_NAME BUCKET CRED_KEY; do
-    [ -n "$NC_USER" ] || continue
-    ACCESS_KEY="$(php -r '$c=json_decode(file_get_contents($argv[1]),true); echo $c[$argv[2]]["access_key"] ?? "";' "$CREDS" "$NC_USER")"
-    SECRET_KEY="$(php -r '$c=json_decode(file_get_contents($argv[1]),true); echo $c[$argv[2]]["secret_key"] ?? "";' "$CREDS" "$NC_USER")"
-    if [ -z "$ACCESS_KEY" ] || [ -z "$SECRET_KEY" ]; then
-        echo "   SKIP $NC_USER/$MOUNT_NAME: kredensial belum ada"
+    # signature yang diinginkan user ini; provider tanpa hostname = belum
+    # dikonfigurasi → cabut mount user ini ditunda demi keamanan.
+    UNCONFIGURED=0
+    DESIRED="$(awk -F'\t' -v u="$NC_USER" '$2==u {print "/" $3 "|" $4 "|" $5}' "$WORK/mounts.tsv" \
+        | while IFS='|' read -r MP BUCKET PROVIDER; do
+        host_raw="$(prov_s3_field "$PROVIDER" hostname)"
+        [ -z "$host_raw" ] && continue
+        host="$(printf '%s' "$host_raw" | sed 's/:[0-9]*$//')"
+        port="$(printf '%s' "$host_raw" | sed -n 's/.*:\([0-9]*\)$/\1/p')"
+        if [ -z "$port" ]; then
+            ssl="$(prov_s3_field "$PROVIDER" use_ssl)"
+            { [ "$ssl" = "1" ] || [ "$ssl" = "true" ]; } && port=443 || port=80
+        fi
+        echo "$MP|$BUCKET|$host|$port"
+    done)"
+    # deteksi provider kosong via mounts.tsv user ini (field ke-5 = provider)
+    while IFS= read -r PROVIDER; do
+        [ -n "$PROVIDER" ] || continue
+        [ -z "$(prov_s3_field "$PROVIDER" hostname)" ] && UNCONFIGURED=1 && break
+    done < <(awk -F'\t' -v u="$NC_USER" '$2==u {print $5}' "$WORK/mounts.tsv")
+    if [ "$UNCONFIGURED" = "1" ]; then
+        echo "   !! $NC_USER: ada provider belum dikonfigurasi (hostname kosong) — pencabutan mount dilewati"
         continue
     fi
 
-    HAVE="$(php -r '
-        $out = shell_exec("php occ files_external:list --output=json " . escapeshellarg($argv[1]) . " 2>/dev/null");
+    # mounts existing user (hanya S3): mount_id \t mp \t bucket \t host \t port
+    php -r '
+        $out = shell_exec("php occ files_external:list " . escapeshellarg($argv[1]) . " --output=json --show-password 2>/dev/null");
         $rows = json_decode((string)$out, true);
-        foreach ((array)$rows as $r) echo ($r["mount_point"] ?? ""), "\n";
+        foreach ((array)$rows as $r) {
+            $cls = (string)($r["storage"] ?? "");
+            if (stripos($cls, "S3") === false) continue;
+            $cfg = (array)($r["configuration"] ?? []);
+            echo $r["mount_id"], "\t", $r["mount_point"], "\t", ($cfg["bucket"] ?? ""), "\t",
+                 ($cfg["hostname"] ?? ""), "\t", ($cfg["port"] ?? ""), "\n";
+        }
+    ' "$NC_USER" 2>/dev/null | { SEEN=""; while IFS=$'\t' read -r MID MP EBUCKET EHOST EPORT; do
+        [ -n "$MID" ] || continue
+        ESIG="$MP|$EBUCKET|$EHOST|$EPORT"
+        if ! printf '%s\n' "$DESIRED" | grep -qxF "$ESIG"; then
+            php occ files_external:delete "$MID" --yes >/dev/null 2>&1 \
+                && echo "   mount id=$MID dicabut dari $NC_USER (tidak sesuai spec)" \
+                || echo "   GAGAL mencabut mount id=$MID"
+            continue
+        fi
+        # signature cocok spec — pertahankan satu, hapus duplikat
+        if printf '%s\n' "$SEEN" | grep -qxF "$ESIG"; then
+            php occ files_external:delete "$MID" --yes >/dev/null 2>&1 \
+                && echo "   mount duplikat id=$MID dicabut dari $NC_USER" \
+                || echo "   GAGAL mencabut duplikat id=$MID"
+        else
+            SEEN="$SEEN$ESIG"$'\n'
+        fi
+    done; }
+done
+
+# --- 3b. buat mount yang diinginkan ---
+while IFS=$'\t' read -r _ NC_USER MOUNT_NAME BUCKET PROVIDER CRED_KEY; do
+    [ -n "$NC_USER" ] || continue
+    ACCESS_KEY="$(creds_get "$CRED_KEY" "$PROVIDER" access_key)"
+    SECRET_KEY="$(creds_get "$CRED_KEY" "$PROVIDER" secret_key)"
+    # fallback provider generik
+    if [ -z "$ACCESS_KEY" ] || [ -z "$SECRET_KEY" ]; then
+        ACCESS_KEY="$(creds_get "$CRED_KEY" "default" access_key)"
+        SECRET_KEY="$(creds_get "$CRED_KEY" "default" secret_key)"
+    fi
+    if [ -z "$ACCESS_KEY" ] || [ -z "$SECRET_KEY" ]; then
+        echo "   SKIP $NC_USER/$MOUNT_NAME: kredensial $PROVIDER belum ada"
+        continue
+    fi
+
+    S3_HOST="$(prov_s3_field "$PROVIDER" hostname)"
+    S3_REGION="$(prov_s3_field "$PROVIDER" region)"; [ -z "$S3_REGION" ] && S3_REGION="us-east-1"
+    S3_SSL="$(prov_s3_field "$PROVIDER" use_ssl)"
+    S3_PATH="$(prov_s3_field "$PROVIDER" use_path_style)"
+    [ -z "$S3_HOST" ] && { echo "   SKIP $NC_USER/$MOUNT_NAME: hostname provider $PROVIDER kosong"; continue; }
+    S3_PORT="$(printf '%s' "$S3_HOST" | sed -n 's/.*:\([0-9]*\)$/\1/p')"
+    [ -n "$S3_PORT" ] || { [ "$S3_SSL" = "1" ] || [ "$S3_SSL" = "true" ] && S3_PORT=443 || S3_PORT=80; }
+    S3_HOSTNAME="$(printf '%s' "$S3_HOST" | sed 's/:[0-9]*$//')"
+    [ "$S3_SSL" = "1" ] || [ "$S3_SSL" = "true" ] && S3_SSL_CFG=true || S3_SSL_CFG=false
+    [ "$S3_PATH" = "1" ] || [ "$S3_PATH" = "true" ] && S3_PATH_CFG=true || S3_PATH_CFG=false
+
+    # cek mount existing: mount_point + bucket + host harus cocok
+    HAVE="$(php -r '
+        $out = shell_exec("php occ files_external:list " . escapeshellarg($argv[1]) . " --output=json --show-password 2>/dev/null");
+        $rows = json_decode((string)$out, true);
+        foreach ((array)$rows as $r) {
+            $cfg = (array)($r["configuration"] ?? []);
+            echo ($r["mount_point"] ?? ""), "\t", ($cfg["bucket"] ?? ""), "\t",
+                 ($cfg["hostname"] ?? ""), "\t", ($cfg["port"] ?? ""), "\n";
+        }
     ' "$NC_USER" 2>/dev/null || true)"
-    if printf '%s\n' "$HAVE" | grep -qxF "/$MOUNT_NAME"; then
-        echo "   mount '/$MOUNT_NAME' sudah ada untuk $NC_USER"; continue
+
+    MATCH=0
+    while IFS=$'\t' read -r MP MB MH MPOR; do
+        [ "$MP" = "/$MOUNT_NAME" ] || continue
+        MB_HOST="$(printf '%s' "$MH" | sed 's/:[0-9]*$//')"
+        MB_PORT="$(printf '%s' "$MH" | sed -n 's/.*:\([0-9]*\)$/\1/p')"; [ -z "$MB_PORT" ] && MB_PORT="$MPOR"
+        if [ "$MB" = "$BUCKET" ] && [ "$MB_HOST" = "$S3_HOSTNAME" ] && [ "$MB_PORT" = "$S3_PORT" ]; then MATCH=1; break; fi
+    done <<< "$HAVE"
+
+    if [ "$MATCH" = "1" ]; then
+        echo "   mount '/$MOUNT_NAME' sudah ada untuk $NC_USER ($PROVIDER)"; continue
     fi
 
     if $OCC files_external:create "/$MOUNT_NAME" amazons3 'amazons3::accesskey' \
@@ -246,39 +470,23 @@ awk -F'\t' 'NF==4' "$TMP_USERS" | while IFS=$'\t' read -r NC_USER MOUNT_NAME BUC
         --config="hostname=$S3_HOSTNAME" \
         --config="port=$S3_PORT" \
         --config="region=$S3_REGION" \
-        --config="use_ssl=$([ "$S3_SSL" = "1" ] && echo true || echo false)" \
-        --config="use_path_style=$([ "$S3_PATH_STYLE" = "1" ] && echo true || echo false)" \
+        --config="use_ssl=$S3_SSL_CFG" \
+        --config="use_path_style=$S3_PATH_CFG" \
         --config="key=$ACCESS_KEY" \
         --config="secret=$SECRET_KEY"; then
-        echo "   mount '/$MOUNT_NAME' → $NC_USER (bucket $BUCKET)"
+        echo "   mount '/$MOUNT_NAME' → $NC_USER (bucket $BUCKET via $PROVIDER)"
     else
-        echo "   GAGAL membuat mount '/$MOUNT_NAME' untuk $NC_USER"
+        echo "   GAGAL membuat mount '/$MOUNT_NAME' untuk $NC_USER ($PROVIDER)"
     fi
-done
+done < "$WORK/mounts.tsv"
 
 # --- 4. grup & kuota home via occ ---
 # Nextcloud 35 mewajibkan password confirmation untuk mengubah grup/kuota
 # lewat Provisioning API, jadi mutasi dilakukan di sini sebagai www-data.
-# Spec menyediakan: managed_groups (top-level), users.<u>.groups (grup
-# produk yang diinginkan) dan users.<u>.home_quota.
-TMP_GROUPS="$(mktemp)"
-php -r '
-    $spec = json_decode(file_get_contents($argv[1]), true);
-    $managed = array_map("strval", (array) ($spec["managed_groups"] ?? []));
-    echo "MANAGED\t", implode(",", $managed), "\n";
-    foreach (($spec["users"] ?? []) as $u => $e) {
-        if (!is_array($e)) { continue; }
-        $hasGroups = isset($e["groups"]) && is_array($e["groups"]);
-        $hasQuota = isset($e["home_quota"]) && is_string($e["home_quota"]) && $e["home_quota"] !== "";
-        if (!$hasGroups && !$hasQuota) { continue; }
-        $groups = $hasGroups ? implode(",", array_map("strval", $e["groups"])) : "";
-        $quota = $hasQuota ? $e["home_quota"] : "";
-        echo "USER\t", $u, "\t", $groups, "\t", $quota, "\n";
-    }
-' "$SPEC" > "$TMP_GROUPS" || true
+TMP_GROUPS="$WORK/groups-run.tsv"
+awk -F'\t' '{print}' "$WORK/groups.tsv" > "$TMP_GROUPS"
 
 MANAGED_CSV="$(awk -F'\t' '$1=="MANAGED"{print $2}' "$TMP_GROUPS" | head -1)"
-# Pastikan semua grup managed + yang diinginkan user ada.
 {
     [ -n "$MANAGED_CSV" ] && printf '%s\n' "$MANAGED_CSV" | tr ',' '\n'
     awk -F'\t' '$1=="USER" && $3!=""{print $3}' "$TMP_GROUPS" | tr ',' '\n'
@@ -300,21 +508,19 @@ awk -F'\t' '$1=="USER"' "$TMP_GROUPS" | while IFS=$'\t' read -r _ NC_USER DESIRE
     CURRENT_GROUPS="$($OCC user:info "$NC_USER" --output=json 2>/dev/null \
         | php -r '$d=json_decode(stream_get_contents(STDIN),true); echo implode("\n", array_map("strval",(array)($d["groups"]??[])));' 2>/dev/null || true)"
 
-    # Keluar dari grup managed yang tidak lagi diinginkan.
     comm -12 \
         <(printf '%s\n' "$CURRENT_GROUPS" | sort -u) \
         <(printf '%s\n' "$MANAGED_CSV" | tr ',' '\n' | sort -u) \
     | while read -r GROUP_ID; do
         [ -n "$GROUP_ID" ] || continue
         case ",$DESIRED_CSV," in
-            *,"$GROUP_ID",*) : ;;  # masih diinginkan
+            *,"$GROUP_ID",*) : ;;
             *) $OCC group:removeuser "$GROUP_ID" "$NC_USER" >/dev/null 2>&1 \
                 && echo "   $NC_USER keluar dari grup $GROUP_ID" \
                 || echo "   GAGAL mengeluarkan $NC_USER dari grup $GROUP_ID" ;;
         esac
     done
 
-    # Masuk ke grup yang diinginkan.
     printf '%s\n' "$DESIRED_CSV" | tr ',' '\n' | sort -u | while read -r GROUP_ID; do
         [ -n "$GROUP_ID" ] || continue
         printf '%s\n' "$CURRENT_GROUPS" | grep -qxF "$GROUP_ID" && continue
@@ -324,7 +530,6 @@ awk -F'\t' '$1=="USER"' "$TMP_GROUPS" | while IFS=$'\t' read -r _ NC_USER DESIRE
     done
 
     if [ -n "$HOME_QUOTA" ]; then
-        # NC35 typed preferences: key lama bisa konflik tipe — fallback hapus+set.
         QUOTA_OK=0
         $OCC user:setting "$NC_USER" files quota "$HOME_QUOTA" >/dev/null 2>&1 && QUOTA_OK=1
         if [ "$QUOTA_OK" = 0 ]; then

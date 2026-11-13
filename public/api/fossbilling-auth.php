@@ -1176,6 +1176,7 @@ function storageProductInfo(array $order): ?array
     //   storage_bucket     — prefix bucket S3 (default: slug produk)
     //   storage_mount      — nama mount/folder (default: judul produk)
     //   storage_grace_hours— grace period setelah expired (default: 720)
+    //   storage_provider   — provider storage (default: aturan kuota 500GB)
     if ($productId !== null) {
         $fbProduct = fossProductConfigs()[$productId] ?? null;
         if (is_array($fbProduct)) {
@@ -1202,6 +1203,7 @@ function storageProductInfo(array $order): ?array
                         $info['grace_hours'] = (float) $fbConfig['storage_grace_hours'];
                     }
                     $info['quota_bytes'] = storageQuotaBytes($info['quota']);
+                    $info['provider'] = storageResolveProvider($fbConfig, $info['quota_bytes']);
                     return $info;
                 }
             }
@@ -1228,11 +1230,28 @@ function storageProductInfo(array $order): ?array
         if (($productId !== null && $normalizedKey === $productId)
             || ($title !== null && $normalizedKey === $title)) {
             $info['quota_bytes'] = storageQuotaBytes($info['quota'] ?? null);
+            $info['provider'] = storageResolveProvider($info, (int) $info['quota_bytes']);
             return $info;
         }
     }
 
     return null;
+}
+
+// Pilih provider storage: storage_provider eksplisit menang; default aturan
+// kuota — >= 500 GB ke 'b2', di bawahnya ke 'r2'. 'minio' tetap bisa dipakai
+// lewat storage_provider eksplisit.
+function storageResolveProvider(array $productConfig, int $quotaBytes, ?string $legacyProvider = null): string
+{
+    $explicit = $productConfig['storage_provider'] ?? $productConfig['provider'] ?? null;
+    if (is_string($explicit) && trim($explicit) !== '') {
+        return trim($explicit);
+    }
+    if ($legacyProvider !== null && $legacyProvider !== '') {
+        return $legacyProvider;
+    }
+
+    return $quotaBytes >= 500 * 1073741824 ? 'b2' : 'r2';
 }
 
 function storageQuotaBytes($quota): int
@@ -1411,7 +1430,7 @@ function writeNextcloudMountSpec(array $orders, ?int $clientId = null): void
     $now = time();
     $startOfToday = strtotime('today');
 
-    // bucket => state: mount (aktif) > retained (grace) > decommission
+    // State per provider|bucket: mount (aktif) > retained (grace) > decommission
     $mounts = [];
     $retained = [];
     $decommission = [];
@@ -1421,7 +1440,9 @@ function writeNextcloudMountSpec(array $orders, ?int $clientId = null): void
             continue;
         }
         $bucketBase = is_string($info['bucket'] ?? null) && $info['bucket'] !== '' ? $info['bucket'] : $info['group'];
+        $provider = is_string($info['provider'] ?? null) && $info['provider'] !== '' ? $info['provider'] : 'default';
         $bucket = $bucketBase . '-' . $clientId;
+        $stateKey = $provider . '|' . $bucket;
 
         $status = strtolower((string) ($order['status'] ?? ''));
         $expiresAt = $order['expires_at'] ?? null;
@@ -1431,17 +1452,18 @@ function writeNextcloudMountSpec(array $orders, ?int $clientId = null): void
 
         if ($isActive) {
             $name = is_string($info['mount'] ?? null) && $info['mount'] !== '' ? $info['mount'] : $info['group'];
-            $mounts[$bucket] = [
+            $mounts[$stateKey] = [
                 'name' => $name,
                 'group' => $info['group'],
                 'bucket' => $bucket,
+                'provider' => $provider,
                 'credentials_key' => $ncUser,
                 'expires_at' => is_string($expiresAt) ? $expiresAt : null,
             ];
-            unset($retained[$bucket], $decommission[$bucket]);
+            unset($retained[$stateKey], $decommission[$stateKey]);
             continue;
         }
-        if (isset($mounts[$bucket]) || isset($retained[$bucket]) || isset($decommission[$bucket])) {
+        if (isset($mounts[$stateKey]) || isset($retained[$stateKey]) || isset($decommission[$stateKey])) {
             continue;
         }
 
@@ -1452,10 +1474,11 @@ function writeNextcloudMountSpec(array $orders, ?int $clientId = null): void
             $anchor = is_string($anchorCandidate) && $anchorCandidate !== '' ? strtotime($anchorCandidate) : $now;
         }
         $graceHours = (float) ($info['grace_hours'] ?? 720);
+        $lifecycleEntry = ['bucket' => $bucket, 'provider' => $provider];
         if ($anchor + $graceHours * 3600 > $now) {
-            $retained[$bucket] = $bucket;
+            $retained[$stateKey] = $lifecycleEntry;
         } else {
-            $decommission[$bucket] = $bucket;
+            $decommission[$stateKey] = $lifecycleEntry;
         }
     }
 
@@ -1479,10 +1502,33 @@ function writeNextcloudMountSpec(array $orders, ?int $clientId = null): void
         unset($all[$ncUser]);
     }
     $tmp = $file . '.tmp';
+    // Spec providers: hanya field non-secret (kredensial admin dibaca dari
+    // env saat provisioning, bukan disimpan di spec).
+    $providers = [];
+    $rawProviders = nextcloudConfig()['providers'] ?? null;
+    $legacyS3 = is_array(nextcloudConfig()['s3'] ?? null) ? nextcloudConfig()['s3'] : [];
+    if (is_array($rawProviders) && $rawProviders !== []) {
+        foreach ($rawProviders as $pname => $pconf) {
+            if (!is_array($pconf)) {
+                continue;
+            }
+            $providers[(string) $pname] = [
+                'type' => (string) ($pconf['type'] ?? 's3-admin'),
+                's3' => is_array($pconf['s3'] ?? null) ? $pconf['s3'] : $legacyS3,
+            ] + array_intersect_key($pconf, array_flip([
+                'account_id', 'api_url', 'admin_user_env', 'admin_pass_env',
+                's3_key_env', 's3_secret_env',
+            ]));
+        }
+    }
+    if ($providers === []) {
+        $providers = ['default' => ['type' => 's3-admin', 's3' => $legacyS3]];
+    }
     // Pertahankan key top-level lain (mis. managed_groups) yang ditulis
     // nextcloudSyncClientStorage.
     $payload = json_encode(array_merge(is_array($existing) ? $existing : [], [
-        's3' => is_array(nextcloudConfig()['s3'] ?? null) ? nextcloudConfig()['s3'] : [],
+        's3' => $legacyS3,
+        'providers' => $providers,
         'users' => $all,
     ]), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
     if (@file_put_contents($tmp, $payload, LOCK_EX) !== false) {
