@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ArrowLeft, Check, LogOut, Save, ShieldCheck } from 'lucide-react'
-import { contactDetails, copy } from './InfoPage.jsx'
+import { contactDetails, infoCopy as copy } from './content/infoCopy.js'
 
 const sections = [
   { id: 'about', label: 'Tentang' },
@@ -153,7 +153,7 @@ function AdminPage() {
   return (
     <main className="admin-shell">
       <div className="admin-card">
-        <a className="admin-back" href="/">
+        <a className="admin-back" href="/id">
           <ArrowLeft size={16} />
           Kembali ke website
         </a>

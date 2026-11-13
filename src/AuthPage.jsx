@@ -45,7 +45,13 @@ function friendlyAuthError(message) {
   return message || 'Layanan akun sedang tidak tersedia. Coba lagi nanti.'
 }
 
-const wantsStorage = () => new URLSearchParams(window.location.search).get('next') === 'storage'
+const nextParam = () => new URLSearchParams(window.location.search).get('next')
+const wantsStorage = () => nextParam() === 'storage'
+const postLoginTarget = () => {
+  const next = nextParam()
+  if (next && next.startsWith('/') && !next.startsWith('//')) return next
+  return '/dashboard'
+}
 
 async function openStorageArea(csrfToken) {
   const response = await fetch('/api/fossbilling-auth.php?action=storage-url', {
@@ -75,9 +81,9 @@ function AuthPage({ mode = 'login' }) {
 
     if (wantsStorage()) return undefined
 
-    const timeout = window.setTimeout(() => window.location.assign('/dashboard'), 1400)
+    const timeout = window.setTimeout(() => window.location.assign(isSignup ? '/dashboard' : postLoginTarget()), 1400)
     return () => window.clearTimeout(timeout)
-  }, [isRedirecting])
+  }, [isRedirecting, isSignup])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -179,14 +185,14 @@ function AuthPage({ mode = 'login' }) {
     <main className="auth-page">
       <div className="auth-atmosphere auth-atmosphere-one" />
       <div className="auth-atmosphere auth-atmosphere-two" />
-      <a className="auth-back-home" href="/">
+      <a className="auth-back-home" href="/id">
         <ArrowLeft size={16} />
         Kembali ke beranda
       </a>
 
       <div className="auth-layout">
         <section className="auth-story" aria-label="Tentang Sangatta Cloud">
-          <a className="auth-brand" href="/">
+          <a className="auth-brand" href="/id">
             <span className="auth-brand-mark"><Cloud size={23} strokeWidth={2.2} /></span>
             <span>Sangatta <b>Cloud</b><i>.</i></span>
           </a>
@@ -332,8 +338,8 @@ function AuthPage({ mode = 'login' }) {
               </a>
             </p>
             <p className="auth-legal">
-              Dengan melanjutkan, kamu menyetujui <a href="/terms">Ketentuan Layanan</a>
-              {' '}dan <a href="/privacy">Kebijakan Privasi</a>.
+              Dengan melanjutkan, kamu menyetujui <a href="/id/terms">Ketentuan Layanan</a>
+              {' '}dan <a href="/id/privacy">Kebijakan Privasi</a>.
             </p>
           </div>
           <p className="auth-footer-note">SANGATTA CLOUD <span>·</span> RUANG DIGITAL MILIKMU</p>

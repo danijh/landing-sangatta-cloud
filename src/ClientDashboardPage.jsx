@@ -288,10 +288,10 @@ function formatRelativeTime(value) {
   return 'Baru saja'
 }
 
-function ClientDashboardPage() {
+function ClientDashboardPage({ initialPage }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const [notice, setNotice] = useState('')
-  const [activePage, setActivePage] = useState(() => (window.location.hash === '#profile' || window.location.hash.startsWith('#ticket-') ? (window.location.hash === '#profile' ? 'profile' : 'support') : 'dashboard'))
+  const [activePage, setActivePage] = useState(() => initialPage || (window.location.hash === '#profile' || window.location.hash.startsWith('#ticket-') ? (window.location.hash === '#profile' ? 'profile' : 'support') : 'dashboard'))
   const [invoiceFilter, setInvoiceFilter] = useState('Menunggu')
   const [articleQuery, setArticleQuery] = useState('')
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
@@ -339,6 +339,11 @@ function ClientDashboardPage() {
   const [selectedOrderCategory, setSelectedOrderCategory] = useState(null)
   const [selectedProductId, setSelectedProductId] = useState(null)
   const [selectedPeriod, setSelectedPeriod] = useState(null)
+  const [orderDeepLink] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    return { plan: params.get('plan'), billing: params.get('billing') }
+  })
+  const orderDeepLinkApplied = useRef(false)
   const [cart, setCart] = useState({ items: [], total: 0, currency: 'IDR' })
   const [cartOpen, setCartOpen] = useState(false)
   const [cartError, setCartError] = useState('')
@@ -450,7 +455,7 @@ function ClientDashboardPage() {
           throw new Error(result.error || 'Sesi akun tidak dapat diverifikasi.')
         }
         if (!result.authenticated) {
-          window.location.replace('/login')
+          window.location.replace(`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`)
           return
         }
         setClient(result.client || {})
@@ -821,6 +826,18 @@ function ClientDashboardPage() {
 
     return () => controller.abort()
   }, [activePage, authState, orderLoadAttempt])
+
+  useEffect(() => {
+    if (orderDeepLinkApplied.current || orderState !== 'loaded' || !orderDeepLink.plan) return
+    orderDeepLinkApplied.current = true
+    const product = orderProducts.find((item) => String(item.id) === String(orderDeepLink.plan))
+    if (!product) return
+    setSelectedOrderCategory(product.category_id ?? null)
+    setSelectedProductId(product.id)
+    setSelectedPeriod(
+      orderDeepLink.billing === 'yearly' ? '1Y' : orderDeepLink.billing === 'monthly' ? '1M' : null,
+    )
+  }, [orderState, orderProducts, orderDeepLink])
 
   useEffect(() => {
     if (authState !== 'authenticated') return undefined
@@ -3033,7 +3050,7 @@ function ClientDashboardPage() {
             <span>Tim kami siap membantu.</span>
             <button type="button" onClick={() => openPage('support')}>Hubungi dukungan <ArrowRight size={13} /></button>
           </div>
-          <a className="dashboard-nav-link" href="/"><Settings2 size={18} /><span>Beranda website</span></a>
+          <a className="dashboard-nav-link" href="/id"><Settings2 size={18} /><span>Beranda website</span></a>
           <p className="dashboard-sidebar-copy">© 2026 Sangatta Cloud</p>
         </div>
       </aside>

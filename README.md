@@ -30,19 +30,32 @@ Setelah mengubah file, simpan lalu refresh browser. Untuk memeriksa hasil build 
 npm run build
 ```
 
+`npm run build` menjalankan `vite build` lalu `scripts/prerender.mjs`, yang
+merender tiap halaman publik (`/id`, `/en`, dan subhalamannya) menjadi HTML
+statis di `dist/` memakai Chrome dan server PHP sementara. Prasyarat: Google
+Chrome/Chromium terinstall (`CHROME_PATH` untuk override lokasi binary) dan
+PHP CLI. Jika Chrome tidak ada, prerender dilewati dengan peringatan. Isi
+`dist/` hasil prerender itulah yang sebaiknya di-deploy agar tiap URL punya
+HTML, `<title>`, dan meta description sendiri untuk SEO/sitelink.
+
+Set `PUBLIC_SITE_URL` (mis. `https://namadomain.com`) saat build untuk
+menyisipkan canonical URL, `hreflang`, `sitemap.xml`, dan referensi sitemap
+di `robots.txt`. Ulangi `npm run prerender` setelah `vite build` bila hanya
+perlu memperbarui HTML statis.
+
 ## Panduan mengubah website
 
 | Yang ingin diubah | Lokasi |
 | --- | --- |
-| Teks website, navigasi, tombol, fitur, dan terjemahan | `src/App.jsx` |
+| Teks website, navigasi, tombol, fitur, dan terjemahan | `src/content/siteContent.js` dan `src/public/` |
 | Paket, harga, deskripsi, dan fitur tiap paket | `public/api/pricing.php` |
 | Warna, font, ukuran, jarak, dan tampilan responsif | `src/styles.css` |
 | Warna dan konfigurasi tema Tailwind | `tailwind.config.js` |
 | Judul awal, deskripsi SEO, warna browser | `index.html` |
 | Gambar, logo, favicon, dan aset statis | `public/` |
 | Halaman login dan pendaftaran pelanggan | `src/AuthPage.jsx` (`/login`, `/signup`) |
-| Pratinjau dashboard pelanggan | `src/ClientDashboardPage.jsx` (`/dashboard`) |
-| Konten awal halaman Tentang, Kontak, Ketentuan, dan Privasi | `src/InfoPage.jsx` |
+| Dashboard pelanggan (order, tagihan, tiket, dst.) | `src/ClientDashboardPage.jsx` (`/dashboard`, `/order`) |
+| Konten awal halaman Tentang, Kontak, Ketentuan, dan Privasi | `src/content/infoCopy.js` |
 | Konten halaman setelah diedit di panel admin | `/admin` (disimpan di `storage/site-content.json`) |
 
 Form `/login` dan `/signup` terhubung ke endpoint guest FossBilling melalui
@@ -113,15 +126,15 @@ Warna tema Tailwind seperti `ink` dan `teal` juga terdaftar di `tailwind.config.
 
 ### Mengubah judul tab dan deskripsi Google
 
-Ubah `<title>`, `description`, atau `theme-color` di `index.html`. Judul halaman juga diperbarui berdasarkan bahasa dari `src/App.jsx`, jadi sesuaikan nilai `title` pada `content.id` dan `content.en` bila mengubah nama/judul website.
+Ubah `<title>`, `description`, atau `theme-color` di `index.html`. Judul dan deskripsi tiap halaman publik diatur di `src/content/siteContent.js` (`siteMeta`) dan `src/content/infoCopy.js`, lalu disuntik ulang saat prerender.
 
 ### Mengubah tautan tombol dan footer
 
-Tautan tombol ditulis sebagai atribut `href` di `src/App.jsx`. Tombol paket memakai URL contoh `/order?plan=...`. Ganti nilainya dengan URL tujuan yang benar saat halaman checkout tersedia.
+Tautan tombol ditulis sebagai atribut `href` di `src/public/PricingSection.jsx`. Tombol paket mengarah ke `/order?plan=...&billing=...`, yang membuka halaman Order di `/dashboard` (pengguna diajak login dulu bila belum masuk, lalu kembali ke halaman Order dengan paket terpilih).
 
 ### Halaman informasi
 
-Halaman informasi tersedia di alamat `/about`, `/contact`, `/terms`, dan `/privacy`. Isi halaman serta terjemahan Indonesia/Inggris berada di `src/InfoPage.jsx`; tampilannya diatur melalui class `info-*` di `src/styles.css`.
+Halaman publik tersedia dalam dua locale: `/id` dan `/en` (default `/` dialihkan ke `/id`). Halaman di dalamnya: beranda (`/id`, `/en`), `/id/pricing`, `/id/features`, `/id/help` (pusat bantuan dari Knowledge Base FossBilling, detail artikel di `/id/help/{slug}`), `/id/about`, `/id/contact`, `/id/terms`, `/id/privacy` (dan padanan `/en/...`). URL lama tanpa prefix (`/about`, dst.) dialihkan ke versi `/id`. Isi halaman informasi serta terjemahannya berada di `src/content/infoCopy.js`; tampilannya diatur melalui class `info-*` di `src/styles.css`.
 
 Konten Tentang, Ketentuan, Privasi, dan informasi kontak juga dapat diubah melalui panel `/admin`. Perubahan disimpan sebagai JSON di direktori `storage/` di luar document root, bukan di database atau browser. PHP harus memiliki izin menulis ke direktori tersebut; lakukan pencadangan file `storage/site-content.json` secara berkala.
 
