@@ -26,3 +26,4 @@ img-sample/
 
 # Agent/tool state
 .codebase-memory/
+nohup.out
