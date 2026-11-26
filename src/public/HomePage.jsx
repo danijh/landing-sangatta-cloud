@@ -99,7 +99,11 @@ export default function HomePage({ locale }) {
                 </div>
                 <div className="window-content">
                   <div className="window-sidebar">
-                    <div className="sidebar-logo"><Cloud size={15} /></div>
+                    <div className="sidebar-logo"> <img
+     src="/images/logo-sc.svg"
+     alt="Sangatta Cloud"
+     className="h-[34px] w-[34px] object-contain"
+   /></div>
                     <span className="sidebar-item active"><Cloud size={13} /></span>
                     <span className="sidebar-item"><FileText size={13} /></span>
                     <span className="sidebar-item"><UsersRound size={13} /></span>

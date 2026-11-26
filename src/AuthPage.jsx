@@ -45,6 +45,48 @@ function friendlyAuthError(message) {
   return message || 'Layanan akun sedang tidak tersedia. Coba lagi nanti.'
 }
 
+const phoneCountryCodes = [
+  ['62', 'Indonesia (+62)'],
+  ['60', 'Malaysia (+60)'],
+  ['65', 'Singapura (+65)'],
+  ['66', 'Thailand (+66)'],
+  ['84', 'Vietnam (+84)'],
+  ['63', 'Filipina (+63)'],
+  ['81', 'Jepang (+81)'],
+  ['82', 'Korea Selatan (+82)'],
+  ['852', 'Hong Kong (+852)'],
+  ['86', 'Tiongkok (+86)'],
+  ['91', 'India (+91)'],
+  ['61', 'Australia (+61)'],
+  ['64', 'Selandia Baru (+64)'],
+  ['1', 'AS / Kanada (+1)'],
+  ['44', 'Inggris (+44)'],
+  ['49', 'Jerman (+49)'],
+  ['33', 'Prancis (+33)'],
+  ['39', 'Italia (+39)'],
+  ['34', 'Spanyol (+34)'],
+  ['31', 'Belanda (+31)'],
+  ['32', 'Belgia (+32)'],
+  ['43', 'Austria (+43)'],
+  ['41', 'Swiss (+41)'],
+  ['46', 'Swedia (+46)'],
+  ['47', 'Norwegia (+47)'],
+  ['45', 'Denmark (+45)'],
+  ['358', 'Finlandia (+358)'],
+  ['48', 'Polandia (+48)'],
+  ['351', 'Portugal (+351)'],
+  ['30', 'Yunani (+30)'],
+  ['90', 'Turki (+90)'],
+  ['971', 'UEA (+971)'],
+  ['966', 'Arab Saudi (+966)'],
+  ['55', 'Brasil (+55)'],
+  ['52', 'Meksiko (+52)'],
+  ['54', 'Argentina (+54)'],
+  ['56', 'Chili (+56)'],
+  ['57', 'Kolombia (+57)'],
+  ['51', 'Peru (+51)'],
+]
+
 const nextParam = () => new URLSearchParams(window.location.search).get('next')
 const wantsStorage = () => nextParam() === 'storage'
 const postLoginTarget = () => {
@@ -75,6 +117,9 @@ function AuthPage({ mode = 'login' }) {
   const [csrfToken, setCsrfToken] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isRedirecting, setIsRedirecting] = useState(false)
+  const [googleAuth, setGoogleAuth] = useState(null)
+  const [googlePending, setGooglePending] = useState(false)
+  const [isConfirmingGoogle, setIsConfirmingGoogle] = useState(false)
 
   useEffect(() => {
     if (!isRedirecting) return undefined
@@ -86,6 +131,13 @@ function AuthPage({ mode = 'login' }) {
   }, [isRedirecting, isSignup])
 
   useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('google_error') === '1') {
+      setNoticeType('error')
+      setNotice('Login dengan Google gagal atau dibatalkan. Silakan coba lagi.')
+    }
+  }, [])
+
+  useEffect(() => {
     const controller = new AbortController()
 
     fetch('/api/fossbilling-auth.php?action=status', { signal: controller.signal })
@@ -95,6 +147,12 @@ function AuthPage({ mode = 'login' }) {
           throw new Error(result.error || 'Sesi tidak dapat disiapkan. Muat ulang halaman.')
         }
         setCsrfToken(result.csrfToken)
+        setGoogleAuth(result.googleAuth || null)
+        setGooglePending(result.googleBridgePending === true)
+        if (result.googleBridgePending === true) {
+          setNoticeType('success')
+          setNotice('Login dengan Google berhasil. Klik "Selesaikan login dengan Google" untuk masuk dashboard.')
+        }
         if (mode === 'login' && result.authenticated === true && wantsStorage()) {
           setIsRedirecting(true)
           await openStorageArea(result.csrfToken)
@@ -162,15 +220,67 @@ function AuthPage({ mode = 'login' }) {
   }
 
   const handleGoogle = () => {
-    setNoticeType('error')
-    setNotice('Google OAuth belum dikonfigurasi. Tidak ada data yang dikirim.')
+    // Prioritaskan OAuth langsung ke backend sendiri; fallback ke extension
+    // Googleauth milik FossBilling bila env Google belum dikonfigurasi.
+    const url = googleAuth?.direct_url || (isSignup ? googleAuth?.signup_url : googleAuth?.login_url)
+    if (!url) {
+      setNoticeType('error')
+      setNotice('Login dengan Google belum tersedia. Silakan masuk dengan email.')
+      return
+    }
+    window.location.assign(url)
+  }
+
+  const handleGoogleConfirm = async () => {
+    if (!csrfToken) {
+      setNoticeType('error')
+      setNotice('Sesi belum siap. Muat ulang halaman lalu coba lagi.')
+      return
+    }
+
+    setIsConfirmingGoogle(true)
+    setNotice('')
+    try {
+      const response = await fetch('/api/fossbilling-auth.php?action=google-bridge-confirm', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-CSRF-Token': csrfToken,
+        },
+        body: '{}',
+      })
+      const result = await response.json()
+      if (!response.ok || result.result !== true || result.error !== null) {
+        const errorMessage = typeof result.error === 'string'
+          ? result.error
+          : result.error?.message
+        throw new Error(errorMessage || 'Login Google tidak dapat diselesaikan. Coba lagi.')
+      }
+
+      setGooglePending(false)
+      setIsRedirecting(true)
+      if (!isSignup && wantsStorage()) {
+        const status = await fetch('/api/fossbilling-auth.php?action=status', { credentials: 'same-origin' })
+        const statusResult = await status.json()
+        await openStorageArea(statusResult.csrfToken)
+      }
+    } catch (error) {
+      setNoticeType('error')
+      setNotice(friendlyAuthError(error.message))
+    } finally {
+      setIsConfirmingGoogle(false)
+    }
   }
 
   if (isRedirecting) {
     return (
       <main className="auth-loading-screen" role="status" aria-live="polite">
         <div className="auth-loading-card">
-          <span className="auth-loading-mark"><Cloud size={26} /></span>
+          <span className="auth-loading-mark"><img
+     src="/images/logo-sc.svg"
+     alt="Sangatta Cloud"
+     className="h-[40px] w-[40px] object-contain"
+   /></span>
           <span className="auth-loading-spinner"><LoaderCircle size={23} /></span>
           <span className="auth-card-kicker">{isSignup ? 'AKUN BERHASIL DIBUAT' : 'BERHASIL MASUK'}</span>
           <h1>{isSignup ? 'Selamat datang!' : 'Senang melihatmu kembali.'}</h1>
@@ -193,7 +303,11 @@ function AuthPage({ mode = 'login' }) {
       <div className="auth-layout">
         <section className="auth-story" aria-label="Tentang Sangatta Cloud">
           <a className="auth-brand" href="/id">
-            <span className="auth-brand-mark"><Cloud size={23} strokeWidth={2.2} /></span>
+            <span className="auth-brand-mark"><img
+     src="/images/logo-sc.svg"
+     alt="Sangatta Cloud"
+     className="h-[34px] w-[34px] object-contain"
+   /></span>
             <span>Sangatta <b>Cloud</b><i>.</i></span>
           </a>
 
@@ -264,6 +378,38 @@ function AuthPage({ mode = 'login' }) {
                 </span>
               </label>
 
+              {isSignup && (
+                <>
+                  <div className="auth-name-fields">
+                    <label className="auth-field">
+                      <span>Kode negara</span>
+                      <select name="phone_cc" defaultValue="62" autoComplete="tel-country-code">
+                        {phoneCountryCodes.map(([code, label]) => (
+                          <option key={code} value={code}>{label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="auth-field">
+                      <span>Nomor telepon</span>
+                      <input
+                        autoComplete="tel-national"
+                        inputMode="tel"
+                        name="phone"
+                        type="tel"
+                        placeholder="81234567890"
+                      />
+                    </label>
+                  </div>
+                  <label className="auth-field">
+                    <span>Mata uang <b>*</b></span>
+                    <select name="currency" defaultValue="IDR">
+                      <option value="IDR">IDR — Rupiah Indonesia</option>
+                      <option value="USD">USD — US Dollar</option>
+                    </select>
+                  </label>
+                </>
+              )}
+
               <label className="auth-field">
                 <span>Kata sandi <b>*</b></span>
                 <span className="auth-input-wrap">
@@ -319,7 +465,13 @@ function AuthPage({ mode = 'login' }) {
             </form>
 
             <div className="auth-divider"><span>atau lanjutkan dengan</span></div>
-            <button className="auth-google-button" type="button" onClick={handleGoogle}>
+            {googlePending && (
+              <button className="auth-google-button" type="button" onClick={handleGoogleConfirm} disabled={isConfirmingGoogle || !csrfToken}>
+                <GoogleMark />
+                {isConfirmingGoogle ? 'Memproses...' : 'Selesaikan login dengan Google'}
+              </button>
+            )}
+            <button className="auth-google-button" type="button" onClick={handleGoogle} disabled={isConfirmingGoogle}>
               <GoogleMark />
               {isSignup ? 'Daftar dengan Google' : 'Lanjutkan dengan Google'}
             </button>

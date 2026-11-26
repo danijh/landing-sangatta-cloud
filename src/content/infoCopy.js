@@ -32,10 +32,12 @@ export const infoCopy = {
     messagePlaceholder: 'Jelaskan kebutuhanmu dengan detail. Jangan sertakan kata sandi atau kode verifikasi.',
     categories: ['Pilih kategori', 'Akun', 'Tagihan dan pembayaran', 'Masalah teknis', 'Lainnya'],
     submitTicket: 'Kirim permintaan',
-    ticketPreviewNotice:
-      'Formulir ini baru berupa tampilan placeholder. Belum terhubung ke FossBilling; jangan masukkan data sungguhan.',
-    ticketNotConnected:
-      'Tiket belum dibuat atau dikirim. Hubungkan formulir ini ke API FossBilling untuk mengaktifkan pengiriman.',
+    ticketSending: 'Mengirim tiket...',
+    ticketCreated: 'Tiket berhasil dibuat',
+    ticketCreatedBody:
+      'Tim dukungan akan membalas melalui email yang kamu cantumkan. Simpan tautan di bawah untuk melihat percakapan tiket.',
+    ticketView: 'Lihat tiket',
+    ticketFailed: 'Tiket belum dapat dibuat. Periksa kembali data lalu coba lagi.',
     privacyHint:
       'Informasi yang kamu kirim nantinya digunakan untuk menangani tiket dukungan. Jangan masukkan kata sandi, kode verifikasi, atau data pembayaran lengkap.',
     legalNotice:
@@ -171,10 +173,12 @@ export const infoCopy = {
     messagePlaceholder: 'Describe what you need. Do not include passwords or verification codes.',
     categories: ['Select a category', 'Account', 'Billing and payments', 'Technical issue', 'Other'],
     submitTicket: 'Send request',
-    ticketPreviewNotice:
-      'This form is a UI placeholder only. It is not connected to FossBilling; do not enter real information.',
-    ticketNotConnected:
-      'No ticket has been created or sent. Connect this form to the FossBilling API to enable submissions.',
+    ticketSending: 'Sending ticket...',
+    ticketCreated: 'Ticket created',
+    ticketCreatedBody:
+      'Our support team will reply to the email you provided. Keep the link below to follow the conversation.',
+    ticketView: 'View ticket',
+    ticketFailed: 'The ticket could not be created. Check your details and try again.',
     privacyHint:
       'Information you submit will be used to handle your support ticket. Do not include passwords, verification codes, or full payment details.',
     legalNotice:

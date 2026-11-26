@@ -21,6 +21,7 @@
 //   remove-bucket <bucket>                  → hapus bucket
 //   ensure-credentials <ncUser> <b1,b2,..>  → JSON {access_key,secret_key}
 //   revoke-credentials <ncUser>             → cabut kredensial provider tsb
+//   usage <credUser> <bucket>               → JSON {"bytes": N} via S3 ListObjectsV2
 //
 // Kredensial user disimpan di <storage>/s3-credentials.json dengan format:
 //   {"fb_4": {"r2": {"access_key": "...", "secret_key": "...", "token_id": "..."}}}
@@ -72,7 +73,8 @@ function httpJson(string $method, string $url, ?array $body = null, array $heade
     $err = curl_error($curl);
     curl_close($curl);
     $json = is_string($raw) ? json_decode($raw, true) : null;
-    return ['status' => $status, 'json' => is_array($json) ? $json : null, 'error' => $err];
+    return ['status' => $status, 'json' => is_array($json) ? $json : null,
+            'body' => is_string($raw) ? $raw : '', 'error' => $err];
 }
 
 function credsLoad(string $file): array
@@ -84,8 +86,11 @@ function credsLoad(string $file): array
 function credsSave(string $file, array $data): void
 {
     $tmp = $file . '.tmp';
-    if (@file_put_contents($tmp, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), LOCK_EX) !== false) {
-        @rename($tmp, $file);
+    $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+    if (@file_put_contents($tmp, $json, LOCK_EX) === false
+        || !@rename($tmp, $file)) {
+        @unlink($tmp);
+        throw new RuntimeException('Gagal menulis kredensial ke ' . $file . ' (permission?)');
     }
 }
 
@@ -314,9 +319,13 @@ function b2EnsureCredentials(string $ncUser, array $buckets, string $credsFile):
     }
     sort($bucketIds);
 
+    // listBuckets wajib ada: B2 S3 API menolak key tanpa capability ini
+    // (Access Denied saat list/head bucket), walau native API tetap jalan.
+    $capabilities = ['listBuckets', 'listFiles', 'readFiles', 'writeFiles', 'deleteFiles'];
+
     $creds = credsLoad($credsFile);
     $existing = $creds[$ncUser][$providerNameGlobal] ?? null;
-    $wantHash = md5(implode(',', $bucketIds));
+    $wantHash = md5(implode(',', $bucketIds) . '|' . implode(',', $capabilities));
     if (is_array($existing)
         && ($existing['buckets_hash'] ?? '') === $wantHash
         && !empty($existing['access_key'])
@@ -335,7 +344,7 @@ function b2EnsureCredentials(string $ncUser, array $buckets, string $credsFile):
 
     $res = b2Api($auth, 'b2_create_key', [
         'keyName' => 'fb-' . preg_replace('/[^a-zA-Z0-9]/', '-', $ncUser) . '-' . substr(md5($ncUser . microtime()), 0, 6),
-        'capabilities' => ['listFiles', 'readFiles', 'writeFiles', 'deleteFiles'],
+        'capabilities' => $capabilities,
         'bucketIds' => $bucketIds,
     ]);
     $key = [
@@ -423,6 +432,130 @@ function r2RevokeCredentials(string $ncUser, string $credsFile): void
     credsSave($credsFile, $creds);
 }
 
+// --- Usage storage: S3 ListObjectsV2 + AWS SigV4 ---
+// Berfungsi untuk semua provider S3-compatible (R2, B2, MinIO) karena
+// ketiganya bicara S3 API untuk operasi object.
+
+function s3CredsFor(string $credUser, string $credsFile, string $type): ?array
+{
+    global $providerNameGlobal;
+    $creds = credsLoad($credsFile);
+    $c = $creds[$credUser][$providerNameGlobal] ?? $creds[$credUser]['minio'] ?? $creds[$credUser]['default'] ?? null;
+    if (!is_array($c) || empty($c['access_key']) || empty($c['secret_key'])) {
+        // legacy flat {user:{access_key,secret_key}} — hanya provider s3-admin
+        if ($type === 's3-admin' && isset($creds[$credUser]['access_key'], $creds[$credUser]['secret_key'])) {
+            $c = $creds[$credUser];
+        }
+    }
+    return is_array($c) && !empty($c['access_key']) && !empty($c['secret_key']) ? $c : null;
+}
+
+// GET bertanda tangan SigV4. $host boleh "host" atau "host:port".
+// $virtualHost=true → bucket jadi subdomain ({bucket}.{host}), uri=/.
+// $virtualHost=false → path-style ({host}/{bucket}), uri=/{bucket}.
+function s3SignedGet(string $scheme, string $host, string $region, string $ak, string $sk,
+                     string $bucket, bool $virtualHost, string $query): array
+{
+    $hostname = preg_replace('/:\d+$/', '', $host);
+    $canonicalHost = $virtualHost ? $bucket . '.' . $hostname : $host;
+    if ($virtualHost && preg_match('/:\d+$/', $host, $m)) {
+        $canonicalHost .= $m[0];
+    }
+    $uri = $virtualHost ? '/' : '/' . $bucket;
+
+    $amzDate = gmdate('Ymd\THis\Z');
+    $dateStamp = gmdate('Ymd');
+    $payloadHash = hash('sha256', '');
+
+    $headers = [
+        'host' => $canonicalHost,
+        'x-amz-content-sha256' => $payloadHash,
+        'x-amz-date' => $amzDate,
+    ];
+    ksort($headers);
+    $canonicalHeaders = '';
+    $signedHeaders = '';
+    foreach ($headers as $k => $v) {
+        $canonicalHeaders .= $k . ':' . trim($v) . "\n";
+        $signedHeaders .= ($signedHeaders === '' ? '' : ';') . $k;
+    }
+
+    $canonicalRequest = "GET\n" . $uri . "\n" . $query . "\n" . $canonicalHeaders . "\n" . $signedHeaders . "\n" . $payloadHash;
+    $scope = $dateStamp . '/' . $region . '/s3/aws4_request';
+    $stringToSign = "AWS4-HMAC-SHA256\n" . $amzDate . "\n" . $scope . "\n" . hash('sha256', $canonicalRequest);
+
+    $kDate = hash_hmac('sha256', $dateStamp, 'AWS4' . $sk, true);
+    $kRegion = hash_hmac('sha256', $region, $kDate, true);
+    $kService = hash_hmac('sha256', 's3', $kRegion, true);
+    $kSigning = hash_hmac('sha256', 'aws4_request', $kService, true);
+    $signature = hash_hmac('sha256', $stringToSign, $kSigning);
+
+    $auth = 'AWS4-HMAC-SHA256 Credential=' . $ak . '/' . $scope
+        . ', SignedHeaders=' . $signedHeaders . ', Signature=' . $signature;
+
+    $path = $virtualHost ? '/' : '/' . rawurlencode($bucket);
+    return httpJson('GET', $scheme . '://' . $canonicalHost . $path . '?' . $query, null, [
+        'Authorization: ' . $auth,
+        'x-amz-date: ' . $amzDate,
+        'x-amz-content-sha256: ' . $payloadHash,
+    ]);
+}
+
+// Jumlahkan Size semua object di bucket via ListObjectsV2 (paginated).
+// Return bytes; lempar exception bila bucket tidak bisa diakses.
+function s3BucketUsage(array $s3, string $bucket, string $ak, string $sk): int
+{
+    $host = trim((string) ($s3['hostname'] ?? ''));
+    if ($host === '') {
+        throw new RuntimeException('hostname provider kosong');
+    }
+    $ssl = filter_var($s3['use_ssl'] ?? true, FILTER_VALIDATE_BOOLEAN);
+    $scheme = $ssl ? 'https' : 'http';
+    $region = (string) ($s3['region'] ?? 'us-east-1');
+    if ($region === '') { $region = 'us-east-1'; }
+    // R2 memakai region 'auto' untuk signing.
+    $pathStyle = filter_var($s3['use_path_style'] ?? true, FILTER_VALIDATE_BOOLEAN);
+
+    $total = 0;
+    $token = '';
+    $triedAlt = false;
+    do {
+        $params = ['list-type' => '2', 'max-keys' => '1000'];
+        if ($token !== '') { $params['continuation-token'] = $token; }
+        // canonical query harus sorted by name dan URI-encoded
+        ksort($params);
+        $query = implode('&', array_map(
+            fn($k, $v) => rawurlencode($k) . '=' . rawurlencode($v),
+            array_keys($params), array_values($params)
+        ));
+
+        $res = s3SignedGet($scheme, $host, $region, $ak, $sk, $bucket, !$pathStyle, $query);
+
+        // fallback ke style satunya bila style konfigurasi ditolak provider
+        if ($res['status'] >= 400 && !$triedAlt) {
+            $triedAlt = true;
+            $pathStyle = !$pathStyle;
+            continue;
+        }
+        if ($res['status'] >= 400) {
+            $snippet = is_string($res['body'] ?? null) ? substr(strip_tags((string) $res['body']), 0, 160) : '';
+            throw new RuntimeException('ListObjects ' . $bucket . ' HTTP ' . $res['status'] . ' ' . $snippet);
+        }
+        $body = (string) ($res['body'] ?? '');
+        if (preg_match_all('/<Size>(\d+)<\/Size>/', $body, $mm)) {
+            foreach ($mm[1] as $s) { $total += (int) $s; }
+        }
+        $truncated = str_contains($body, '<IsTruncated>true</IsTruncated>');
+        $token = '';
+        if ($truncated && preg_match('/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/', $body, $tm)) {
+            $token = $tm[1];
+        } else {
+            $truncated = false;
+        }
+    } while ($truncated);
+    return $total;
+}
+
 // Dipakai fungsi di atas — di-set setelah parsing argumen.
 $providerNameGlobal = $providerName;
 $providerAccountId = trim((string) ($provider['account_id'] ?? ''));
@@ -432,6 +565,22 @@ $bucketsArg = static function (string $csv): array {
 };
 
 try {
+    // usage berlaku untuk semua tipe provider (murni S3 API + kredensial
+    // tersimpan) — tidak bergantung pada mekanisme admin bucket-nya.
+    if ($action === 'usage') {
+        $credUser = (string) ($args[0] ?? '');
+        $bucket = (string) ($args[1] ?? '');
+        $s3 = is_array($provider['s3'] ?? null) ? $provider['s3'] : [];
+        $creds = s3CredsFor($credUser, $credsFile, $type);
+        if ($creds === null) {
+            fwrite(STDERR, "usage: kredensial $credUser/$providerName tidak ada\n");
+            exit(1);
+        }
+        $bytes = s3BucketUsage($s3, $bucket, (string) $creds['access_key'], (string) $creds['secret_key']);
+        echo json_encode(['bucket' => $bucket, 'bytes' => $bytes]);
+        exit(0);
+    }
+
     switch ($type) {
         case 'cloudflare':
             switch ($action) {

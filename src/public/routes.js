@@ -1,5 +1,5 @@
 export const LOCALES = ['id', 'en']
-export const PUBLIC_PAGES = ['', 'pricing', 'features', 'help', 'articles', 'artikel', 'about', 'contact', 'terms', 'privacy']
+export const PUBLIC_PAGES = ['', 'pricing', 'features', 'help', 'articles', 'artikel', 'about', 'contact', 'terms', 'privacy', 'support']
 export const INFO_PAGES = ['about', 'contact', 'terms', 'privacy']
 export const DEFAULT_LOCALE = 'id'
 
@@ -17,6 +17,9 @@ export const articlePath = (locale, article) =>
 export const newsArticlePath = (locale, article) =>
   `/${locale}/${localizedPageSegment(locale, 'articles')}/${encodeURIComponent(article.slug || String(article.id))}`
 
+export const supportTicketPath = (locale, hash) =>
+  `/${locale}/support/${encodeURIComponent(hash)}`
+
 export const alternateLocale = (locale) => (locale === 'id' ? 'en' : 'id')
 
 export function parsePublicPath(pathname) {
@@ -29,7 +32,7 @@ export function parsePublicPath(pathname) {
   const secondPage = SEGMENT_PAGES[second] || second
 
   if (third !== undefined) {
-    if ((secondPage === 'help' || secondPage === 'articles') && third !== '') {
+    if ((secondPage === 'help' || secondPage === 'articles' || secondPage === 'support') && third !== '') {
       return { locale: first, page: secondPage, slug: decodeURIComponent(third) }
     }
     return null

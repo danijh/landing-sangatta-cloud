@@ -10,6 +10,7 @@ import HelpPage from './public/HelpPage.jsx'
 import HelpArticlePage from './public/HelpArticlePage.jsx'
 import ArticlesPage from './public/ArticlesPage.jsx'
 import ArticlePage from './public/ArticlePage.jsx'
+import GuestTicketPage from './public/GuestTicketPage.jsx'
 import { DEFAULT_LOCALE, INFO_PAGES, parsePublicPath, pathFor } from './public/routes.js'
 
 function Redirect({ to }) {
@@ -48,6 +49,10 @@ function App() {
     if (!page) return <HomePage locale={locale} />
     if (page === 'help' && slug) return <HelpArticlePage locale={locale} articleKey={slug} />
     if (page === 'articles' && slug) return <ArticlePage locale={locale} articleKey={slug} />
+    if (page === 'support') {
+      if (!slug) return <Redirect to={pathFor(locale, 'contact')} />
+      return <GuestTicketPage locale={locale} hash={slug} />
+    }
     if (INFO_PAGES.includes(page)) return <InfoPage page={page} locale={locale} />
     const Page = PUBLIC_PAGE_COMPONENTS[page]
     if (Page) return <Page locale={locale} />

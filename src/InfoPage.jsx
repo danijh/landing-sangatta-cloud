@@ -15,7 +15,10 @@ const pageKeys = ['about', 'contact', 'terms', 'privacy']
 
 function InfoPage({ page, locale = 'id' }) {
   const language = locale
-  const [ticketNotice, setTicketNotice] = useState(false)
+  const [ticketState, setTicketState] = useState('idle')
+  const [ticketError, setTicketError] = useState('')
+  const [ticketHash, setTicketHash] = useState('')
+  const [helpdesks, setHelpdesks] = useState([])
   const [savedContent, setSavedContent] = useState(null)
   const [contentLoadError, setContentLoadError] = useState(false)
   const t = infoCopy[language]
@@ -58,9 +61,52 @@ function InfoPage({ page, locale = 'id' }) {
     }
   }, [])
 
-  const handleTicketSubmit = (event) => {
+  useEffect(() => {
+    if (page !== 'contact') return undefined
+    const controller = new AbortController()
+    fetch('/api/guest-support.php?action=helpdesks', { signal: controller.signal })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (response.ok && Array.isArray(result?.helpdesks)) {
+          setHelpdesks(result.helpdesks)
+        }
+      })
+      .catch(() => {})
+    return () => controller.abort()
+  }, [page])
+
+  const handleTicketSubmit = async (event) => {
     event.preventDefault()
-    setTicketNotice(true)
+    const form = event.currentTarget
+    const data = new FormData(form)
+    const payload = {
+      name: String(data.get('name') || '').trim(),
+      email: String(data.get('email') || '').trim(),
+      subject: String(data.get('subject') || '').trim(),
+      message: String(data.get('message') || '').trim(),
+    }
+    const helpdeskId = String(data.get('helpdesk_id') || '').trim()
+    if (helpdeskId !== '') payload.support_helpdesk_id = helpdeskId
+
+    setTicketState('sending')
+    setTicketError('')
+    try {
+      const response = await fetch('/api/guest-support.php?action=ticket-create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const result = await response.json().catch(() => null)
+      if (!response.ok || !result?.hash) {
+        throw new Error(result?.error || t.ticketFailed)
+      }
+      setTicketHash(result.hash)
+      setTicketState('created')
+      form.reset()
+    } catch (error) {
+      setTicketError(error.message || t.ticketFailed)
+      setTicketState('error')
+    }
   }
 
   useEffect(() => {
@@ -73,8 +119,12 @@ function InfoPage({ page, locale = 'id' }) {
       <header className="info-header">
         <div className="site-container info-header-inner">
           <a className="brand-lockup info-brand" href={homeHref} aria-label={`${t.brand} ${t.home}`}>
-            <span className="brand-mark">
-              <Cloud size={21} strokeWidth={2.2} />
+            <span className="auth-brand-mark">
+              <img
+     src="/images/logo-sc.svg"
+     alt=""
+     className="h-[34px] w-[34px] object-contain"
+   />
             </span>
             <span className="text-[17px] font-bold tracking-[-0.04em]">
               Sangatta Cloud<span className="text-teal">.</span>
@@ -166,60 +216,71 @@ function InfoPage({ page, locale = 'id' }) {
                   <h2>{t.contactFormTitle}</h2>
                   <p>{t.contactFormBody}</p>
                 </div>
-                <p className="ticket-placeholder-notice" role="note">
-                  {t.ticketPreviewNotice}
-                </p>
-                <form className="ticket-form" onSubmit={handleTicketSubmit}>
-                  <div className="ticket-field-grid">
+                {ticketState === 'created' ? (
+                  <div className="ticket-created" role="status">
+                    <strong>{t.ticketCreated}</strong>
+                    <p>{t.ticketCreatedBody}</p>
+                    <a className="button button-teal ticket-submit" href={`/${language}/support/${ticketHash}`}>
+                      {t.ticketView}
+                      <ArrowUpRight size={16} />
+                    </a>
+                  </div>
+                ) : (
+                  <form className="ticket-form" onSubmit={handleTicketSubmit}>
+                    <div className="ticket-field-grid">
+                      <label className="ticket-field">
+                        <span>{t.nameLabel}</span>
+                        <input autoComplete="name" name="name" placeholder={t.namePlaceholder} required />
+                      </label>
+                      <label className="ticket-field">
+                        <span>{t.emailLabel}</span>
+                        <input
+                          autoComplete="email"
+                          name="email"
+                          placeholder={t.emailPlaceholder}
+                          required
+                          type="email"
+                        />
+                      </label>
+                    </div>
+                    {helpdesks.length > 0 && (
+                      <label className="ticket-field">
+                        <span>{t.categoryLabel}</span>
+                        <select defaultValue="" name="helpdesk_id">
+                          <option value="">{t.categories[0]}</option>
+                          {helpdesks.map((helpdesk) => (
+                            <option key={helpdesk.id} value={helpdesk.id}>
+                              {helpdesk.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    )}
                     <label className="ticket-field">
-                      <span>{t.nameLabel}</span>
-                      <input autoComplete="name" name="name" placeholder={t.namePlaceholder} required />
+                      <span>{t.subjectLabel}</span>
+                      <input name="subject" placeholder={t.subjectPlaceholder} required />
                     </label>
                     <label className="ticket-field">
-                      <span>{t.emailLabel}</span>
-                      <input
-                        autoComplete="email"
-                        name="email"
-                        placeholder={t.emailPlaceholder}
+                      <span>{t.messageLabel}</span>
+                      <textarea
+                        name="message"
+                        placeholder={t.messagePlaceholder}
                         required
-                        type="email"
+                        rows="5"
                       />
                     </label>
-                  </div>
-                  <label className="ticket-field">
-                    <span>{t.categoryLabel}</span>
-                    <select defaultValue="" name="category" required>
-                      {t.categories.map((category, index) => (
-                        <option disabled={index === 0} key={category} value={index === 0 ? '' : category}>
-                          {category}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="ticket-field">
-                    <span>{t.subjectLabel}</span>
-                    <input name="subject" placeholder={t.subjectPlaceholder} required />
-                  </label>
-                  <label className="ticket-field">
-                    <span>{t.messageLabel}</span>
-                    <textarea
-                      name="message"
-                      placeholder={t.messagePlaceholder}
-                      required
-                      rows="5"
-                    />
-                  </label>
-                  <p className="ticket-privacy-hint">{t.privacyHint}</p>
-                  <button className="button button-teal ticket-submit" type="submit">
-                    {t.submitTicket}
-                    <ArrowUpRight size={16} />
-                  </button>
-                  {ticketNotice && (
-                    <p className="ticket-placeholder-notice" role="status">
-                      {t.ticketNotConnected}
-                    </p>
-                  )}
-                </form>
+                    <p className="ticket-privacy-hint">{t.privacyHint}</p>
+                    <button className="button button-teal ticket-submit" type="submit" disabled={ticketState === 'sending'}>
+                      {ticketState === 'sending' ? t.ticketSending : t.submitTicket}
+                      <ArrowUpRight size={16} />
+                    </button>
+                    {ticketState === 'error' && (
+                      <p className="ticket-form-error" role="alert">
+                        {ticketError || t.ticketFailed}
+                      </p>
+                    )}
+                  </form>
+                )}
               </section>
             </div>
           ) : (

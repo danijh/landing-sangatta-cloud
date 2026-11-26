@@ -1,8 +1,16 @@
 @import 'tailwindcss';
 @config '../tailwind.config.js';
 
+@font-face {
+  font-family: 'Inter';
+  src: url('/fonts/inter-var.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
-  font-family: 'DM Sans', ui-sans-serif, system-ui, sans-serif;
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
   color: #0d233a;
   background: #fbfaf8;
     font-synthesis: none;
@@ -274,7 +282,7 @@ a {
 .section-heading h2,
 .promise-copy h2,
 .cta-section h2 {
-  font-family: Manrope, 'DM Sans', sans-serif;
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
 }
 
 .avatar-stack {
@@ -454,7 +462,7 @@ a {
 
 .window-heading h3 {
   margin: 5px 0 0;
-  font-family: Manrope, sans-serif;
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
   font-size: 14px;
   font-weight: 700;
   letter-spacing: -0.04em;
@@ -956,7 +964,7 @@ a {
 
 .plan-price {
   color: #0d233a;
-  font-family: Manrope, sans-serif;
+  font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
@@ -1869,6 +1877,66 @@ a {
   background: #fff8f0;
   font-size: 11px;
   line-height: 1.6;
+}
+
+.ticket-created {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(47, 141, 131, 0.28);
+  border-radius: 10px;
+  padding: 20px;
+  background: #f2faf8;
+}
+
+.ticket-created strong {
+  color: #0d5c54;
+  font-size: 15px;
+}
+
+.ticket-created p {
+  margin: 0;
+  color: rgba(13, 35, 58, 0.66);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.ticket-form-error {
+  margin: 0;
+  border: 1px solid rgba(190, 60, 40, 0.25);
+  border-radius: 8px;
+  padding: 10px 13px;
+  color: #8f3524;
+  background: #fdf1ee;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.guest-ticket-panel {
+  max-width: 860px;
+  margin: 0 auto 72px;
+  border: 1px solid #e3e9ec;
+  border-radius: 12px;
+  padding: clamp(18px, 3vw, 28px);
+  background: white;
+}
+
+.guest-ticket-panel .dashboard-page-heading h2 {
+  margin: 4px 0 0;
+  color: #12283a;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.guest-ticket-panel .dashboard-ticket-message > p {
+  font-size: 14px;
+}
+
+@media (max-width: 720px) {
+  .guest-ticket-panel {
+    margin-bottom: 48px;
+    padding: 16px;
+  }
 }
 
 .legal-notice {
@@ -3141,6 +3209,7 @@ a {
 }
 
 .dashboard-search {
+  position: relative;
   display: flex;
   width: min(345px, 42vw);
   height: 37px;
@@ -3153,10 +3222,76 @@ a {
   background: #f8fafb;
 }
 
+.dashboard-search-panel {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  left: 0;
+  width: min(380px, 92vw);
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid #e6ebed;
+  border-radius: 12px;
+  padding: 8px;
+  background: white;
+  box-shadow: 0 18px 40px rgba(20, 40, 52, 0.14);
+}
+
+.dashboard-search-panel > p {
+  margin: 6px 6px 8px;
+  color: #617582;
+  font-size: 12px;
+}
+
+.dashboard-search-group {
+  margin: 8px 6px 4px;
+  color: #8a9aa4;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.dashboard-search-panel ul {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.dashboard-search-panel li button {
+  display: grid;
+  width: 100%;
+  gap: 1px;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: #617582;
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dashboard-search-panel li button:hover {
+  background: #f3f6f7;
+}
+
+.dashboard-search-panel li button strong {
+  color: #1d2f3a;
+  font-size: 13px;
+}
+
+.dashboard-search-panel li button small {
+  color: #617582;
+}
+
 .dashboard-search input {
   width: 100%;
   border: 0;
   outline: 0;
+  padding-right: 30px;
   color: #213647;
   background: transparent;
   font: inherit;
@@ -3165,6 +3300,25 @@ a {
 
 .dashboard-search input::placeholder {
   color: #9aa7af;
+}
+
+.dashboard-search-clear {
+  position: absolute;
+  right: 36px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: #8a9aa4;
+  background: transparent;
+  cursor: pointer;
+}
+
+.dashboard-search-clear:hover {
+  color: #213647;
+  background: #e8edef;
 }
 
 .dashboard-search kbd {
@@ -3444,38 +3598,6 @@ a {
   width: min(1440px, 100%);
   margin: 0 auto;
   padding: 28px clamp(22px, 4vw, 56px) 22px;
-}
-
-.dashboard-preview-alert {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  border: 1px solid #d4e7e2;
-  border-radius: 8px;
-  padding: 10px 13px;
-  color: #476c67;
-  background: #edf7f3;
-}
-
-.dashboard-preview-alert > span {
-  display: grid;
-  width: 29px;
-  height: 29px;
-  flex: 0 0 29px;
-  place-items: center;
-  border-radius: 8px;
-  color: #398b7f;
-  background: #dcefe8;
-}
-
-.dashboard-preview-alert p {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.dashboard-preview-alert strong {
-  color: #256e64;
 }
 
 .dashboard-welcome {
@@ -5113,12 +5235,16 @@ a {
   margin-top: 18px;
 }
 
-.dashboard-service-usage > div:first-child {
+.dashboard-service-usage > div:not(.dashboard-usage) {
   display: flex;
   justify-content: space-between;
   margin-bottom: 7px;
   color: #86949c;
   font-size: 11px;
+}
+
+.dashboard-service-usage .dashboard-usage {
+  margin: 3px 0 9px;
 }
 
 .dashboard-service-usage strong {
@@ -5531,6 +5657,15 @@ a {
     width: min(280px, 48vw);
   }
 
+  .dashboard-search-panel {
+    left: auto;
+    right: 0;
+  }
+
+  .dashboard-search-clear {
+    right: 8px;
+  }
+
   .dashboard-search kbd,
   .dashboard-account-copy,
   .dashboard-topbar-balance-copy,
@@ -5625,6 +5760,12 @@ a {
     width: auto;
     min-width: 0;
     flex: 1;
+  }
+
+  .dashboard-search-panel {
+    left: 0;
+    right: 0;
+    width: auto;
   }
 
   .dashboard-search input {

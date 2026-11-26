@@ -41,8 +41,12 @@ export default function SiteHeader({ locale, page = '', t }) {
     <header className="absolute inset-x-0 top-0 z-30">
       <div className="site-container flex h-[84px] items-center justify-between">
         <a className="brand-lockup" href={pathFor(locale)} aria-label="Sangatta Cloud home">
-          <span className="brand-mark">
-            <Cloud size={21} strokeWidth={2.2} />
+          <span className="auth-brand-mark">
+            <img
+     src="/images/logo-sc-grey.svg"
+     alt="Sangatta Cloud"
+     className="h-[34px] w-[34px] object-contain"
+   />
           </span>
           <span className="text-teal text-[28px] font-bold tracking-[-0.04em]">
             Sangatta <span className="text-[#8a94a6]">Cloud</span><span className="text-ember animate-pulse">.</span>

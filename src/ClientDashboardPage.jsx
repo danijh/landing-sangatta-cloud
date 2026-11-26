@@ -45,17 +45,6 @@ const countryOptions = countryCodes
   .map((code) => ({ code, name: countryNames.of(code) || code }))
   .sort((a, b) => a.code === 'ID' ? -1 : b.code === 'ID' ? 1 : a.name.localeCompare(b.name, 'id'))
 
-const services = [
-  { name: 'Cloud Personal', detail: 'Penyimpanan privat', used: '24 GB', total: '100 GB', progress: 24, next: '26 Nov 2026' },
-  { name: 'Cloud Team', detail: 'Ruang kerja bersama', used: '68 GB', total: '250 GB', progress: 27, next: '12 Des 2026' },
-]
-
-const invoices = [
-  { id: 'INV-2026-018', date: '18 Okt 2026', due: '28 Okt 2026', amount: 'Rp149.000', status: 'Menunggu' },
-  { id: 'INV-2026-012', date: '18 Sep 2026', due: '28 Sep 2026', amount: 'Rp149.000', status: 'Lunas' },
-  { id: 'INV-2026-006', date: '18 Agu 2026', due: '28 Agu 2026', amount: 'Rp149.000', status: 'Lunas' },
-]
-
 const dashboardMenuItems = [
   { id: 'dashboard', label: 'Ringkasan', icon: LayoutDashboard },
   { id: 'orders', label: 'Order', icon: ShoppingCart },
@@ -123,7 +112,7 @@ function QrisPanel({ payment }) {
   return (
     <div className="dashboard-payment-va dashboard-payment-qris">
       <div>
-        <small>Pembayaran QRIS {payment.payment_type === 'gopay' ? 'GoPay' : 'Komerce'}</small>
+        <small>Pembayaran QRIS</small>
         <small>Nominal yang harus dibayar</small>
         <b>{formatFullPrice(payment.amount, 'IDR')}</b>
         <small>Pindai dengan aplikasi bank atau e-wallet apa pun. Bayar sesuai nominal persis{payment.payment_type === 'gopay' ? ', termasuk kode unik di belakang' : ', termasuk angka unik di belakang'}.</small>
@@ -242,6 +231,9 @@ function groupCartItems(items) {
   return [...groups.values()]
 }
 
+const isMacPlatform = typeof navigator !== 'undefined'
+  && /mac|iphone|ipad/i.test(`${navigator.platform || ''} ${navigator.userAgent || ''}`)
+
 const periodLabels = { '1M': 'Bulanan', '1Y': 'Tahunan' }
 
 function formatServicePeriod(period) {
@@ -294,6 +286,10 @@ function ClientDashboardPage({ initialPage }) {
   const [activePage, setActivePage] = useState(() => initialPage || (window.location.hash === '#profile' || window.location.hash.startsWith('#ticket-') ? (window.location.hash === '#profile' ? 'profile' : 'support') : 'dashboard'))
   const [invoiceFilter, setInvoiceFilter] = useState('Menunggu')
   const [articleQuery, setArticleQuery] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [searchRequested, setSearchRequested] = useState(false)
+  const searchInputRef = useRef(null)
   const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const [profileTab, setProfileTab] = useState('details')
   const [authState, setAuthState] = useState('loading')
@@ -308,7 +304,6 @@ function ClientDashboardPage({ initialPage }) {
   const [isChangingPassword, setIsChangingPassword] = useState(false)
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [serviceOrders, setServiceOrders] = useState([])
-  const [storageSummary, setStorageSummary] = useState(null)
   const [serviceState, setServiceState] = useState('idle')
   const [serviceError, setServiceError] = useState('')
   const [serviceLoadAttempt, setServiceLoadAttempt] = useState(0)
@@ -643,7 +638,7 @@ function ClientDashboardPage({ initialPage }) {
   }, [ticketModalOpen])
 
   useEffect(() => {
-    if (authState !== 'authenticated' || !['dashboard', 'services', 'orders', 'checkout'].includes(activePage)) return undefined
+    if (authState !== 'authenticated' || (!['dashboard', 'services', 'orders', 'checkout'].includes(activePage) && !searchRequested)) return undefined
 
     const controller = new AbortController()
     setServiceState('loading')
@@ -659,7 +654,6 @@ function ClientDashboardPage({ initialPage }) {
           throw new Error(result?.error || 'Daftar layanan tidak dapat dimuat.')
         }
         setServiceOrders(result.orders)
-        setStorageSummary(result.storage && typeof result.storage === 'object' ? result.storage : null)
         setServicePage(1)
         setServiceState('loaded')
       })
@@ -671,10 +665,10 @@ function ClientDashboardPage({ initialPage }) {
       })
 
     return () => controller.abort()
-  }, [activePage, authState, serviceLoadAttempt])
+  }, [activePage, authState, serviceLoadAttempt, searchRequested])
 
   useEffect(() => {
-    if (authState !== 'authenticated' || (activePage !== 'invoices' && activePage !== 'dashboard')) return undefined
+    if (authState !== 'authenticated' || ((activePage !== 'invoices' && activePage !== 'dashboard') && !searchRequested)) return undefined
 
     const controller = new AbortController()
     setInvoiceState('loading')
@@ -700,7 +694,7 @@ function ClientDashboardPage({ initialPage }) {
       })
 
     return () => controller.abort()
-  }, [activePage, authState, invoiceLoadAttempt])
+  }, [activePage, authState, invoiceLoadAttempt, searchRequested])
 
   useEffect(() => {
     if (authState !== 'authenticated' || activePage !== 'emails') return undefined
@@ -1000,6 +994,43 @@ function ClientDashboardPage({ initialPage }) {
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
+  const openInvoiceDetail = (invoice) => {
+    setInvoiceDetailState('loading')
+    setInvoiceDetailError('')
+    setInvoiceDetail(null)
+    fetch(`/api/fossbilling-auth.php?action=invoice&id=${encodeURIComponent(invoice.id)}`, { credentials: 'same-origin' })
+      .then(async (response) => {
+        const result = await response.json().catch(() => null)
+        if (!response.ok || !result?.invoice) {
+          throw new Error(result?.error || 'Rincian tagihan tidak dapat dimuat.')
+        }
+        setInvoiceDetail(result.invoice)
+        setInvoiceDetailState('loaded')
+      })
+      .catch((error) => {
+        setInvoiceDetailError(error.message || 'Rincian tagihan tidak dapat dimuat.')
+        setInvoiceDetailState('error')
+      })
+  }
+
+  const closeSearch = () => {
+    setSearchOpen(false)
+    setSearchQuery('')
+    setSearchRequested(false)
+  }
+
+  const handleSearchServiceSelect = (order) => {
+    closeSearch()
+    openPage('services')
+    setServiceDetail(order)
+  }
+
+  const handleSearchInvoiceSelect = (invoice) => {
+    closeSearch()
+    openPage('invoices')
+    openInvoiceDetail(invoice)
+  }
+
   const openNewsArticle = (item) => {
     const ref = { slug: item.slug || '', id: item.id }
     setNewsArticle({ status: 'loading', article: null, ref, error: '' })
@@ -1058,6 +1089,33 @@ function ClientDashboardPage({ initialPage }) {
       const bExp = b.expires_at ? new Date(String(b.expires_at).replace(' ', 'T')).getTime() : Number.MAX_SAFE_INTEGER
       return aExp - bExp
     })
+  const storageUsage = (() => {
+    let usedBytes = 0
+    let quotaBytes = 0
+    let hasUsed = false
+    let hasQuota = false
+    for (const order of activeServiceOrders) {
+      const storage = order?.storage
+      if (!storage || typeof storage !== 'object') continue
+      const used = Number(storage.used_bytes)
+      const quota = Number(storage.quota_bytes)
+      if (Number.isFinite(used) && used >= 0) {
+        usedBytes += used
+        hasUsed = true
+      }
+      if (Number.isFinite(quota) && quota > 0) {
+        quotaBytes += quota
+        hasQuota = true
+      }
+    }
+    return {
+      usedBytes,
+      quotaBytes,
+      hasUsed,
+      hasQuota,
+      pct: hasQuota ? Math.min(100, (usedBytes / quotaBytes) * 100) : 0,
+    }
+  })()
   const kbArticleHtml = useMemo(() => {
     const content = kbArticleModal.article?.content
     if (typeof content !== 'string' || content.trim() === '') return ''
@@ -1080,6 +1138,37 @@ function ClientDashboardPage({ initialPage }) {
     .map((part) => part[0])
     .join('')
     .toUpperCase()
+  const accountCurrency = String(profile?.currency || wallet.currency || 'IDR').toUpperCase()
+  const accountCurrencyLabel = accountCurrency === 'IDR' ? 'IDR · Rupiah' : accountCurrency
+
+  const searchResults = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase()
+    if (!query) return { services: [], invoices: [] }
+    const matches = (...fields) => fields.some((field) => String(field ?? '').toLowerCase().includes(query))
+    return {
+      services: serviceOrders
+        .filter((order) => matches(order.title, order.id, order.status))
+        .slice(0, 5),
+      invoices: invoiceRecords
+        .filter((invoice) => matches(invoice.number, invoice.title, invoice.id, invoice.status))
+        .slice(0, 5),
+    }
+  }, [searchQuery, serviceOrders, invoiceRecords])
+
+  const searchLoading = serviceState === 'idle' || serviceState === 'loading'
+    || invoiceState === 'idle' || invoiceState === 'loading'
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault()
+        searchInputRef.current?.focus()
+        searchInputRef.current?.select()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   // Peta produk yang masih aktif per product_id — dipakai untuk memberi tahu
   // bahwa pembelian ulang akan memperpanjang masa aktif, bukan produk baru.
@@ -1683,7 +1772,7 @@ function ClientDashboardPage({ initialPage }) {
       return (
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading">
-            <div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Status pembayaran</h2><p>Data respons dari {created?.payment_type === 'gopay' ? 'gateway QRIS GoPay' : 'Komerce'} untuk pembayaran {created?.payment_type === 'qris' ? 'QRIS' : created?.payment_type === 'gopay' ? 'QRIS GoPay' : 'Virtual Account'}.</p></div>
+            <div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Status pembayaran</h2><p>Data respons dari {created?.payment_type === 'gopay' ? 'gateway QRIS' : 'Komerce'} untuk pembayaran {['qris', 'gopay'].includes(created?.payment_type) ? 'QRIS' : 'Virtual Account'}.</p></div>
           </div>
           {!created ? (
             <div className="dashboard-empty-state"><span><CreditCard size={22} /></span><strong>Belum ada pembayaran</strong><p>Mulai dari keranjang untuk membuat pembayaran.</p><button className="dashboard-outline-action" type="button" onClick={() => openPage('orders')}>Lihat produk</button></div>
@@ -1781,11 +1870,10 @@ function ClientDashboardPage({ initialPage }) {
                 {(() => {
                   const methodId = (method) => `${method.payment_type}:${method.bank_code || ''}`
                   const vaMethods = paymentMethods.items.filter((method) => method.payment_type === 'va' && method.bank_code !== 'BJB' && method.bank_code !== 'SMBC' && method.bank_code !== 'DBS')
-                  const qrisMethod = paymentMethods.items.find((method) => method.payment_type === 'qris')
                   const otherMethods = paymentMethods.items.filter((method) => method.payment_type !== 'va' && method.payment_type !== 'qris')
                   return (
                     <>
-                      {(vaMethods.length > 0 || qrisMethod) && (
+                      {vaMethods.length > 0 && (
                         <>
                           <p className="dashboard-payment-group">Virtual Account</p>
                           <div className="dashboard-bank-grid" role="radiogroup" aria-label="Virtual Account">
@@ -1796,15 +1884,9 @@ function ClientDashboardPage({ initialPage }) {
                                   : <span>{method.bank_code}</span>}
                               </button>
                             ))}
-                            {qrisMethod && (
-                              <button type="button" role="radio" aria-checked={paymentMethod === methodId(qrisMethod)} aria-label="QRIS Komerce" title="QRIS Komerce" className={`dashboard-bank-option dashboard-bank-qris${paymentMethod === methodId(qrisMethod) ? ' is-active' : ''}`} onClick={() => { setPaymentMethod(methodId(qrisMethod)); setCheckoutError('') }}>
-                                <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
-                                <span>Komerce</span>
-                              </button>
-                            )}
-                            <button type="button" role="radio" aria-checked={paymentMethod === 'gopay:'} aria-label="QRIS GoPay" title="QRIS GoPay" className={`dashboard-bank-option dashboard-bank-qris${paymentMethod === 'gopay:' ? ' is-active' : ''}`} onClick={() => { setPaymentMethod('gopay:'); setCheckoutError('') }}>
+                            <button type="button" role="radio" aria-checked={paymentMethod === 'qris:'} aria-label="QRIS" title="QRIS" className={`dashboard-bank-option dashboard-bank-qris${paymentMethod === 'qris:' ? ' is-active' : ''}`} onClick={() => { setPaymentMethod('qris:'); setCheckoutError('') }}>
                               <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
-                              <span>GoPay</span>
+                              <span>QRIS</span>
                             </button>
                             <button type="button" className="dashboard-bank-option dashboard-bank-balance" aria-label="Bayar dengan saldo" title="Bayar dengan saldo" onClick={() => { setCheckoutBalancePassword(''); setCheckoutBalanceError(''); setCheckoutBalanceOpen(true) }}>
                               <Wallet size={22} />
@@ -1812,8 +1894,7 @@ function ClientDashboardPage({ initialPage }) {
                             </button>
                           </div>
                           <p className="dashboard-fee-note">* Biaya transaksi virtual account Rp 4.440,-</p>
-                          <p className="dashboard-fee-note">* Biaya transaksi menggunakan QRIS Komerce 0,7% + 0,29%.</p>
-                          <p className="dashboard-fee-note">* QRIS GoPay tanpa biaya tambahan; nominal akhir mendapat kode unik.</p>
+                          <p className="dashboard-fee-note">* QRIS dikenai biaya transaksi MDR 0,29% (+0,7% untuk nominal di atas Rp 100.000); nominal akhir mendapat kode unik.</p>
                         </>
                       )}
                       {otherMethods.length > 0 && (
@@ -2654,25 +2735,6 @@ function ClientDashboardPage({ initialPage }) {
         return activeFilter.statuses.includes(status) || Boolean(activeFilter.include?.(invoice))
       })
 
-      const openInvoiceDetail = (invoice) => {
-        setInvoiceDetailState('loading')
-        setInvoiceDetailError('')
-        setInvoiceDetail(null)
-        fetch(`/api/fossbilling-auth.php?action=invoice&id=${encodeURIComponent(invoice.id)}`, { credentials: 'same-origin' })
-          .then(async (response) => {
-            const result = await response.json().catch(() => null)
-            if (!response.ok || !result?.invoice) {
-              throw new Error(result?.error || 'Rincian tagihan tidak dapat dimuat.')
-            }
-            setInvoiceDetail(result.invoice)
-            setInvoiceDetailState('loaded')
-          })
-          .catch((error) => {
-            setInvoiceDetailError(error.message || 'Rincian tagihan tidak dapat dimuat.')
-            setInvoiceDetailState('error')
-          })
-      }
-
       return (
         <section className="dashboard-page-panel">
           <div className="dashboard-page-heading"><div><span className="dashboard-section-kicker">PEMBAYARAN</span><h2>Tagihan</h2><p>Lihat status dan riwayat tagihan akunmu.</p></div></div>
@@ -3019,7 +3081,11 @@ function ClientDashboardPage({ initialPage }) {
     <main className="client-dashboard">
       <aside className={`dashboard-sidebar ${menuOpen ? 'dashboard-sidebar-open' : ''}`}>
         <a className="dashboard-brand" href="/dashboard" onClick={(event) => { event.preventDefault(); openPage('dashboard') }}>
-          <span className="dashboard-brand-mark"><Cloud size={22} /></span>
+          <span className="dashboard-brand-mark"><img
+     src="/images/logo-sc.svg"
+     alt=""
+     className="h-[34px] w-[34px] object-contain"
+   /></span>
           <span>Sangatta <b>Cloud</b><i>.</i></span>
         </a>
         <p className="dashboard-nav-label">MENU UTAMA</p>
@@ -3038,10 +3104,6 @@ function ClientDashboardPage({ initialPage }) {
               {id === 'support' && supportUnread > 0 && <span className="dashboard-nav-count">{supportUnread}</span>}
             </button>
           ))}
-          <button className="dashboard-nav-link" type="button" onClick={handleOpenStorage}>
-            <HardDrive size={18} />
-            <span>Storage Area</span>
-          </button>
         </nav>
         <div className="dashboard-sidebar-bottom">
           <div className="dashboard-help-card">
@@ -3060,10 +3122,85 @@ function ClientDashboardPage({ initialPage }) {
           <button className="dashboard-menu-toggle" type="button" onClick={() => setMenuOpen((open) => !open)} aria-label={menuOpen ? 'Tutup menu' : 'Buka menu'}>
             {menuOpen ? <X size={20} /> : <Menu size={20} />}
           </button>
-          <div className="dashboard-search">
+          <div
+            className="dashboard-search"
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setSearchOpen(false)
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') setSearchOpen(false)
+            }}
+          >
             <Search size={16} />
-            <input aria-label="Cari" placeholder="Cari layanan, tagihan..." />
-            <kbd>⌘ K</kbd>
+            <input
+              ref={searchInputRef}
+              aria-label="Cari"
+              placeholder="Cari layanan, tagihan..."
+              value={searchQuery}
+              onFocus={() => setSearchOpen(true)}
+              onChange={(event) => {
+                setSearchQuery(event.target.value)
+                setSearchRequested(event.target.value.trim() !== '')
+                setSearchOpen(true)
+              }}
+            />
+            {searchQuery !== '' && (
+              <button
+                type="button"
+                className="dashboard-search-clear"
+                aria-label="Hapus pencarian"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  setSearchQuery('')
+                  setSearchRequested(false)
+                  setSearchOpen(false)
+                  searchInputRef.current?.focus()
+                }}
+              >
+                <X size={14} />
+              </button>
+            )}
+            <kbd>{isMacPlatform ? '⌘ K' : 'Ctrl K'}</kbd>
+            {searchOpen && searchQuery.trim() !== '' && (
+              <div className="dashboard-search-panel" role="listbox" aria-label="Hasil pencarian">
+                {searchResults.services.length === 0 && searchResults.invoices.length === 0 ? (
+                  <p>{searchLoading ? 'Memuat hasil...' : `Tidak ada hasil untuk "${searchQuery.trim()}".`}</p>
+                ) : (
+                  <>
+                    {searchResults.services.length > 0 && (
+                      <>
+                        <p className="dashboard-search-group">Layanan</p>
+                        <ul>
+                          {searchResults.services.map((order) => (
+                            <li key={`service-${order.id}`}>
+                              <button type="button" role="option" aria-selected="false" onClick={() => handleSearchServiceSelect(order)}>
+                                <strong>{order.title}</strong>
+                                <small>Order #{order.id}{order.expires_at ? ` · s/d ${formatInvoiceDate(order.expires_at)}` : ''}</small>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                    {searchResults.invoices.length > 0 && (
+                      <>
+                        <p className="dashboard-search-group">Tagihan</p>
+                        <ul>
+                          {searchResults.invoices.map((invoice) => (
+                            <li key={`invoice-${invoice.id}`}>
+                              <button type="button" role="option" aria-selected="false" onClick={() => handleSearchInvoiceSelect(invoice)}>
+                                <strong>{invoice.number || `#${invoice.id}`}</strong>
+                                <small>{invoice.total === null || invoice.total === undefined ? '-' : formatFullPrice(invoice.total, invoice.currency || 'IDR')} · {invoiceStatusDisplay(invoice.status).label}</small>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </div>
           <div className="dashboard-notification-wrap" onBlur={(event) => {
             if (!event.currentTarget.contains(event.relatedTarget)) setCartOpen(false)
@@ -3132,11 +3269,6 @@ function ClientDashboardPage({ initialPage }) {
         </header>
 
         <div className="dashboard-content">
-          <div className="dashboard-preview-alert" role="note">
-            <span><ShieldCheck size={17} /></span>
-            <p><strong>Pratinjau dashboard</strong> — beberapa data masih contoh; daftar layanan dimuat dari FossBilling.</p>
-          </div>
-
           {activePage === 'dashboard' ? (
             <>
           <section className="dashboard-welcome">
@@ -3178,9 +3310,18 @@ function ClientDashboardPage({ initialPage }) {
             <article className="dashboard-stat-card">
               <span className="dashboard-stat-icon stat-icon-blue"><HardDrive size={19} /></span>
               <span className="dashboard-stat-label">Penyimpanan terpakai</span>
-              <strong>92 <small>GB</small></strong>
-              <div className="dashboard-usage"><span /></div>
-              <small>92 GB dari 350 GB</small>
+              {storageUsage.hasUsed || storageUsage.hasQuota ? (
+                <>
+                  <strong>{storageUsage.hasUsed ? formatStorageBytes(storageUsage.usedBytes) : '—'}</strong>
+                  {storageUsage.hasQuota && <div className="dashboard-usage"><span style={{ width: `${storageUsage.pct}%` }} /></div>}
+                  <small>{storageUsage.hasQuota ? `${formatStorageBytes(storageUsage.usedBytes)} dari ${formatStorageBytes(storageUsage.quotaBytes)}` : 'Kuota belum diatur'}</small>
+                </>
+              ) : (
+                <>
+                  <strong>—</strong>
+                  <small>Belum ada data penyimpanan</small>
+                </>
+              )}
             </article>
           </section>
 
@@ -3201,6 +3342,15 @@ function ClientDashboardPage({ initialPage }) {
                   const priceLabel = priceValue !== null && priceValue !== undefined && priceValue !== '' && Number.isFinite(Number(priceValue))
                     ? `${formatFullPrice(Number(priceValue), currency)}${servicePeriodLabel(service.period) ? ` / ${servicePeriodLabel(service.period)}` : ''}`
                     : '-'
+                  const usedBytes = Number(service.storage?.used_bytes)
+                  const quotaBytes = Number(service.storage?.quota_bytes)
+                  const hasUsage = Number.isFinite(usedBytes) && quotaBytes > 0
+                  const usagePct = hasUsage ? Math.min(100, (usedBytes / quotaBytes) * 100) : 0
+                  const usagePctLabel = usagePct > 0 && usagePct < 10
+                    ? usagePct.toFixed(usagePct < 1 ? 2 : 1)
+                    : String(Math.round(usagePct))
+                  // Sliver minimum supaya pemakaian kecil tetap terlihat sebagai bar.
+                  const barPct = hasUsage && usedBytes > 0 && usagePct < 1 ? 1 : usagePct
                   return (
                     <article
                       className="dashboard-service-card dashboard-service-card-clickable"
@@ -3218,10 +3368,13 @@ function ClientDashboardPage({ initialPage }) {
                       <p>{priceLabel}</p>
                       <div className="dashboard-service-usage">
                         <div><span>Perpanjangan</span><strong>{formatInvoiceDate(service.expires_at)}</strong></div>
-                        {service.storage?.quota && <div><span>Penyimpanan</span><strong>{service.storage.quota}</strong></div>}
-                        {storageSummary?.quota && typeof storageSummary.quota.used !== 'undefined' && (
-                          <div><span>Kuota terpakai</span><strong>{formatStorageBytes(storageSummary.quota.used)} <small>/ {storageSummary.quota.quota || '-'}</small></strong></div>
+                        {hasUsage && (
+                          <>
+                            <div className="dashboard-usage"><span style={{ width: `${barPct}%` }} /></div>
+                            <div><span>Penyimpanan</span><strong>{formatStorageBytes(usedBytes)} <small>dari {service.storage.quota || formatStorageBytes(quotaBytes)} · {usagePctLabel}%</small></strong></div>
+                          </>
                         )}
+                        {!hasUsage && service.storage?.quota && <div><span>Penyimpanan</span><strong>{service.storage.quota}</strong></div>}
                       </div>
                       <div className="dashboard-service-footer">
                         <span>Order <strong>#{service.id}</strong></span>
@@ -3233,24 +3386,14 @@ function ClientDashboardPage({ initialPage }) {
                     </article>
                   )
                 })
-              ) : services.map((service) => (
-                <article className="dashboard-service-card" key={service.name}>
-                  <div className="dashboard-service-top">
-                    <span className="dashboard-service-icon"><Cloud size={20} /></span>
-                    <span className="dashboard-status status-active"><i /> Aktif</span>
-                  </div>
-                  <h3>{service.name}</h3>
-                  <p>{service.detail}</p>
-                  <div className="dashboard-service-usage">
-                    <div><span>Penyimpanan</span><strong>{service.used} <small>/ {service.total}</small></strong></div>
-                    <div className="dashboard-usage"><span style={{ width: `${service.progress}%` }} /></div>
-                  </div>
-                  <div className="dashboard-service-footer">
-                    <span>Perpanjangan <strong>{service.next}</strong></span>
-                    <button type="button" onClick={() => setNotice('Detail layanan akan aktif setelah data FossBilling tersedia.')}>Kelola <ArrowRight size={14} /></button>
-                  </div>
-                </article>
-              ))}
+              ) : serviceState === 'error' ? (
+                <div className="dashboard-profile-load-error" role="alert">
+                  <p>{serviceError}</p>
+                  <button type="button" className="dashboard-profile-retry" onClick={() => setServiceLoadAttempt((attempt) => attempt + 1)}>Coba lagi</button>
+                </div>
+              ) : (
+                <p className="dashboard-table-empty">Memuat layanan...</p>
+              )}
             </div>
           </section>
 
@@ -3264,28 +3407,36 @@ function ClientDashboardPage({ initialPage }) {
                 <table>
                   <thead><tr><th>Nomor</th><th>Tanggal</th><th>Total</th><th>Status</th><th /></tr></thead>
                   <tbody>
-                    {(invoiceState === 'loaded'
-                      ? invoiceRecords.slice(0, 3).map((invoice) => ({
-                          id: invoice.number || `#${invoice.id}`,
-                          invoiceId: invoice.id,
-                          number: invoice.number,
-                          date: formatInvoiceDate(invoice.created_at),
-                          due: formatInvoiceDate(invoice.due_at),
-                          amount: invoice.total === null || invoice.total === undefined
-                            ? '-'
-                            : formatFullPrice(invoice.total, invoice.currency || 'IDR'),
-                          status: invoice.status,
-                        }))
-                      : invoices
-                    ).map((invoice) => (
-                      <tr key={invoice.id}>
-                        <td><strong>{invoice.id}</strong><small>Jatuh tempo {invoice.due}</small></td>
-                        <td>{invoice.date}</td>
-                        <td className="invoice-amount">{invoice.amount}</td>
-                        <td><span className={`dashboard-status ${invoiceStatusDisplay(invoice.status).tone}`}><i />{invoiceStatusDisplay(invoice.status).label}</span></td>
-                        <td><button type="button" className="invoice-download" aria-label={`Unduh ${invoice.id}`} disabled={isPdfDownloading} onClick={() => invoice.invoiceId ? downloadInvoicePdf(invoice.invoiceId, invoice.number) : setNotice('Unduh invoice akan tersedia setelah API FossBilling dihubungkan.')}><ArrowDownToLine size={16} /></button></td>
-                      </tr>
-                    ))}
+                    {invoiceState === 'loaded' ? (
+                      invoiceRecords.length === 0 ? (
+                        <tr><td className="dashboard-table-empty" colSpan="5">Belum ada tagihan.</td></tr>
+                      ) : invoiceRecords.slice(0, 3).map((invoice) => ({
+                        id: invoice.number || `#${invoice.id}`,
+                        invoiceId: invoice.id,
+                        number: invoice.number,
+                        date: formatInvoiceDate(invoice.created_at),
+                        due: formatInvoiceDate(invoice.due_at),
+                        amount: invoice.total === null || invoice.total === undefined
+                          ? '-'
+                          : formatFullPrice(invoice.total, invoice.currency || 'IDR'),
+                        status: invoice.status,
+                      })).map((invoice) => (
+                        <tr key={invoice.id}>
+                          <td><strong>{invoice.id}</strong><small>Jatuh tempo {invoice.due}</small></td>
+                          <td>{invoice.date}</td>
+                          <td className="invoice-amount">{invoice.amount}</td>
+                          <td><span className={`dashboard-status ${invoiceStatusDisplay(invoice.status).tone}`}><i />{invoiceStatusDisplay(invoice.status).label}</span></td>
+                          <td><button type="button" className="invoice-download" aria-label={`Unduh ${invoice.id}`} disabled={isPdfDownloading} onClick={() => downloadInvoicePdf(invoice.invoiceId, invoice.number)}><ArrowDownToLine size={16} /></button></td>
+                        </tr>
+                      ))
+                    ) : invoiceState === 'error' ? (
+                      <tr><td className="dashboard-table-empty" colSpan="5">
+                        {invoiceError}{' '}
+                        <button type="button" className="dashboard-profile-retry" onClick={() => setInvoiceLoadAttempt((attempt) => attempt + 1)}>Coba lagi</button>
+                      </td></tr>
+                    ) : (
+                      <tr><td className="dashboard-table-empty" colSpan="5">Memuat tagihan...</td></tr>
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -3295,12 +3446,12 @@ function ClientDashboardPage({ initialPage }) {
               <article className="dashboard-account-card">
                 <div className="dashboard-section-heading"><div><span className="dashboard-section-kicker">AKUN</span><h2>Profil singkat</h2></div></div>
                 <div className="dashboard-profile">
-                  <span className="dashboard-avatar dashboard-avatar-large">SC</span>
-                  <div><strong>Nama Pelanggan</strong><span>pelanggan@example.com</span></div>
+                  <span className="dashboard-avatar dashboard-avatar-large">{customerInitials}</span>
+                  <div><strong>{customerName}</strong><span>{profile?.email || client.email || '—'}</span></div>
                 </div>
-                <div className="dashboard-profile-meta"><span>ID Pelanggan</span><strong>SC-00042</strong></div>
-                <div className="dashboard-profile-meta"><span>Mata uang</span><strong>IDR · Rupiah</strong></div>
-                <button type="button" className="dashboard-profile-link" onClick={() => setNotice('Pengaturan profil akan tersedia setelah integrasi API.')}>Kelola profil <ArrowRight size={14} /></button>
+                <div className="dashboard-profile-meta"><span>ID Pelanggan</span><strong>{client.id ? `#${client.id}` : '—'}</strong></div>
+                <div className="dashboard-profile-meta"><span>Mata uang</span><strong>{accountCurrencyLabel}</strong></div>
+                <button type="button" className="dashboard-profile-link" onClick={() => openPage('profile')}>Kelola profil <ArrowRight size={14} /></button>
               </article>
               <article className="dashboard-support-card" id="support">
                 <span className="dashboard-support-icon"><LifeBuoy size={19} /></span>
@@ -3448,10 +3599,9 @@ function ClientDashboardPage({ initialPage }) {
                 {paymentMethods.status === 'ready' && (() => {
                   const methodId = (method) => `${method.payment_type}:${method.bank_code || ''}`
                   const vaMethods = paymentMethods.items.filter((method) => method.payment_type === 'va' && method.bank_code !== 'BJB' && method.bank_code !== 'SMBC' && method.bank_code !== 'DBS')
-                  const qrisMethod = paymentMethods.items.find((method) => method.payment_type === 'qris')
                   return (
                     <>
-                      {(vaMethods.length > 0 || qrisMethod) && (
+                      {vaMethods.length > 0 && (
                         <>
                           <p className="dashboard-payment-group">Virtual Account</p>
                           <div className="dashboard-bank-grid" role="radiogroup" aria-label="Virtual Account">
@@ -3462,15 +3612,9 @@ function ClientDashboardPage({ initialPage }) {
                                   : <span>{method.bank_code}</span>}
                               </button>
                             ))}
-                            {qrisMethod && (
-                              <button type="button" role="radio" aria-checked={invoicePayMethod === methodId(qrisMethod)} aria-label="QRIS Komerce" title="QRIS Komerce" className={`dashboard-bank-option dashboard-bank-qris${invoicePayMethod === methodId(qrisMethod) ? ' is-active' : ''}`} onClick={() => { setInvoicePayMethod(methodId(qrisMethod)); setInvoicePayError('') }}>
-                                <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
-                                <span>Komerce</span>
-                              </button>
-                            )}
-                            <button type="button" role="radio" aria-checked={invoicePayMethod === 'gopay:'} aria-label="QRIS GoPay" title="QRIS GoPay" className={`dashboard-bank-option dashboard-bank-qris${invoicePayMethod === 'gopay:' ? ' is-active' : ''}`} onClick={() => { setInvoicePayMethod('gopay:'); setInvoicePayError('') }}>
+                            <button type="button" role="radio" aria-checked={invoicePayMethod === 'qris:'} aria-label="QRIS" title="QRIS" className={`dashboard-bank-option dashboard-bank-qris${invoicePayMethod === 'qris:' ? ' is-active' : ''}`} onClick={() => { setInvoicePayMethod('qris:'); setInvoicePayError('') }}>
                               <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
-                              <span>GoPay</span>
+                              <span>QRIS</span>
                             </button>
                             <button type="button" className="dashboard-bank-option dashboard-bank-balance" aria-label="Bayar dengan saldo" title="Bayar dengan saldo" onClick={() => { setBalancePayPassword(''); setBalancePayError(''); setBalancePayOpen(true) }}>
                               <Wallet size={22} />
@@ -3478,8 +3622,7 @@ function ClientDashboardPage({ initialPage }) {
                             </button>
                           </div>
                           <p className="dashboard-fee-note">* Biaya transaksi virtual account Rp 4.440,-</p>
-                          <p className="dashboard-fee-note">* Biaya transaksi QRIS Komerce 0,7% + 0,29%.</p>
-                          <p className="dashboard-fee-note">* QRIS GoPay tanpa biaya tambahan; nominal akhir mendapat kode unik.</p>
+                          <p className="dashboard-fee-note">* QRIS dikenai biaya transaksi MDR 0,29% (+0,7% untuk nominal di atas Rp 100.000); nominal akhir mendapat kode unik.</p>
                         </>
                       )}
                     </>
@@ -3604,10 +3747,9 @@ function ClientDashboardPage({ initialPage }) {
                 {paymentMethods.status === 'ready' && (() => {
                   const methodId = (method) => `${method.payment_type}:${method.bank_code || ''}`
                   const vaMethods = paymentMethods.items.filter((method) => method.payment_type === 'va' && method.bank_code !== 'BJB' && method.bank_code !== 'SMBC' && method.bank_code !== 'DBS')
-                  const qrisMethod = paymentMethods.items.find((method) => method.payment_type === 'qris')
                   return (
                     <>
-                      {(vaMethods.length > 0 || qrisMethod) && (
+                      {vaMethods.length > 0 && (
                         <>
                           <p className="dashboard-payment-group">Virtual Account</p>
                           <div className="dashboard-bank-grid" role="radiogroup" aria-label="Virtual Account">
@@ -3618,20 +3760,13 @@ function ClientDashboardPage({ initialPage }) {
                                   : <span>{method.bank_code}</span>}
                               </button>
                             ))}
-                            {qrisMethod && (
-                              <button type="button" role="radio" aria-checked={topupMethod === methodId(qrisMethod)} aria-label="QRIS Komerce" title="QRIS Komerce" className={`dashboard-bank-option dashboard-bank-qris${topupMethod === methodId(qrisMethod) ? ' is-active' : ''}`} onClick={() => { setTopupMethod(methodId(qrisMethod)); setTopupError('') }}>
-                                <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
-                                <span>Komerce</span>
-                              </button>
-                            )}
-                            <button type="button" role="radio" aria-checked={topupMethod === 'gopay:'} aria-label="QRIS GoPay" title="QRIS GoPay" className={`dashboard-bank-option dashboard-bank-qris${topupMethod === 'gopay:' ? ' is-active' : ''}`} onClick={() => { setTopupMethod('gopay:'); setTopupError('') }}>
+                            <button type="button" role="radio" aria-checked={topupMethod === 'qris:'} aria-label="QRIS" title="QRIS" className={`dashboard-bank-option dashboard-bank-qris${topupMethod === 'qris:' ? ' is-active' : ''}`} onClick={() => { setTopupMethod('qris:'); setTopupError('') }}>
                               <img src={QRIS_LOGO_URL} alt="" loading="lazy" referrerPolicy="no-referrer" />
-                              <span>GoPay</span>
+                              <span>QRIS</span>
                             </button>
                           </div>
                           <p className="dashboard-fee-note">* Biaya transaksi virtual account Rp 4.440,-</p>
-                          <p className="dashboard-fee-note">* Biaya transaksi QRIS Komerce 0,7% + 0,29%.</p>
-                          <p className="dashboard-fee-note">* QRIS GoPay tanpa biaya tambahan; nominal akhir mendapat kode unik.</p>
+                          <p className="dashboard-fee-note">* QRIS dikenai biaya transaksi MDR 0,29% (+0,7% untuk nominal di atas Rp 100.000); nominal akhir mendapat kode unik.</p>
                         </>
                       )}
                     </>

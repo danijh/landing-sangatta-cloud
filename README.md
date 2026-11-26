@@ -92,8 +92,8 @@ Untuk menggunakan logo sendiri:
 
    ```jsx
    <img
-     src="/images/logo.svg"
-     alt=""
+     src="/images/logo-sc.svg"
+     alt="Sangatta Cloud"
      className="h-[34px] w-[34px] object-contain"
    />
    ```

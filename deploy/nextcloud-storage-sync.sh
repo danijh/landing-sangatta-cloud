@@ -440,24 +440,40 @@ while IFS=$'\t' read -r _ NC_USER MOUNT_NAME BUCKET PROVIDER CRED_KEY; do
     [ "$S3_SSL" = "1" ] || [ "$S3_SSL" = "true" ] && S3_SSL_CFG=true || S3_SSL_CFG=false
     [ "$S3_PATH" = "1" ] || [ "$S3_PATH" = "true" ] && S3_PATH_CFG=true || S3_PATH_CFG=false
 
-    # cek mount existing: mount_point + bucket + host harus cocok
+    # cek mount existing: mount_point + bucket + host + access key harus cocok.
+    # Access key ikut dibandingkan karena kredensial provider bisa dirotasi
+    # (mis. B2 key dibuat ulang) sementara signature mount tidak berubah.
     HAVE="$(php -r '
         $out = shell_exec("php occ files_external:list " . escapeshellarg($argv[1]) . " --output=json --show-password 2>/dev/null");
         $rows = json_decode((string)$out, true);
         foreach ((array)$rows as $r) {
             $cfg = (array)($r["configuration"] ?? []);
-            echo ($r["mount_point"] ?? ""), "\t", ($cfg["bucket"] ?? ""), "\t",
-                 ($cfg["hostname"] ?? ""), "\t", ($cfg["port"] ?? ""), "\n";
+            echo $r["mount_id"], "\t", ($r["mount_point"] ?? ""), "\t", ($cfg["bucket"] ?? ""), "\t",
+                 ($cfg["hostname"] ?? ""), "\t", ($cfg["port"] ?? ""), "\t", ($cfg["key"] ?? ""), "\n";
         }
     ' "$NC_USER" 2>/dev/null || true)"
 
     MATCH=0
-    while IFS=$'\t' read -r MP MB MH MPOR; do
+    STALE_IDS=""
+    while IFS=$'\t' read -r MID MP MB MH MPOR MKEY; do
         [ "$MP" = "/$MOUNT_NAME" ] || continue
         MB_HOST="$(printf '%s' "$MH" | sed 's/:[0-9]*$//')"
         MB_PORT="$(printf '%s' "$MH" | sed -n 's/.*:\([0-9]*\)$/\1/p')"; [ -z "$MB_PORT" ] && MB_PORT="$MPOR"
-        if [ "$MB" = "$BUCKET" ] && [ "$MB_HOST" = "$S3_HOSTNAME" ] && [ "$MB_PORT" = "$S3_PORT" ]; then MATCH=1; break; fi
+        if [ "$MB" = "$BUCKET" ] && [ "$MB_HOST" = "$S3_HOSTNAME" ] && [ "$MB_PORT" = "$S3_PORT" ]; then
+            if [ "$MKEY" = "$ACCESS_KEY" ]; then
+                MATCH=1; break
+            fi
+            STALE_IDS="$STALE_IDS $MID"
+        fi
     done <<< "$HAVE"
+
+    # mount ada tapi menyimpan access key lama → cabut lalu buat ulang
+    for MID in $STALE_IDS; do
+        php occ files_external:delete "$MID" --yes >/dev/null 2>&1 \
+            && echo "   mount id=$MID (kredensial lama) dicabut dari $NC_USER" \
+            || echo "   GAGAL mencabut mount id=$MID"
+    done
+    [ -n "$STALE_IDS" ] && MATCH=0
 
     if [ "$MATCH" = "1" ]; then
         echo "   mount '/$MOUNT_NAME' sudah ada untuk $NC_USER ($PROVIDER)"; continue
@@ -479,6 +495,34 @@ while IFS=$'\t' read -r _ NC_USER MOUNT_NAME BUCKET PROVIDER CRED_KEY; do
         echo "   GAGAL membuat mount '/$MOUNT_NAME' untuk $NC_USER ($PROVIDER)"
     fi
 done < "$WORK/mounts.tsv"
+
+# --- 3c. usage storage per bucket → usage.json (dibaca dashboard) ---
+# Satu call S3 ListObjectsV2 per bucket; gagal per bucket tidak menggagalkan run.
+USAGE_TSV="$WORK/usage.tsv"; : > "$USAGE_TSV"
+while IFS=$'\t' read -r _ NC_USER _MOUNT_NAME BUCKET PROVIDER CRED_KEY; do
+    [ -n "${BUCKET:-}" ] || continue
+    res="$(php "$PROVIDER_PHP" "$SPEC" "$PROVIDER" usage "$CRED_KEY" "$BUCKET" 2>/dev/null)" || {
+        echo "   !! usage $NC_USER/$BUCKET ($PROVIDER) gagal"; continue; }
+    bytes="$(printf '%s' "$res" | php -r '$d=json_decode(stream_get_contents(STDIN),true); echo isset($d["bytes"])?$d["bytes"]:"";')"
+    [ -n "$bytes" ] && printf '%s\t%s\t%s\t%s\n' "$NC_USER" "$PROVIDER" "$BUCKET" "$bytes" >> "$USAGE_TSV"
+done < "$WORK/mounts.tsv"
+
+php -r '
+    $f=$argv[1]; $tsv=$argv[2];
+    $usage=["generated_at"=>time(),"usage"=>[]];
+    if(is_file($tsv)){
+        foreach(file($tsv,FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES) as $l){
+            $p=explode("\t",$l);
+            if(count($p)<4) continue;
+            [$u,$pr,$b,$by]=$p;
+            $usage["usage"][$u][$pr."|".$b]=(int)$by;
+        }
+    }
+    $tmp=$f.".tmp";
+    if(file_put_contents($tmp,json_encode($usage,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES),LOCK_EX)===false
+        || !rename($tmp,$f)){ @unlink($tmp); fwrite(STDERR,"usage.json gagal ditulis\n"); }
+' "$STORAGE_DIR/usage.json" "$USAGE_TSV"
+echo "   usage.json diperbarui ($(wc -l < "$USAGE_TSV") bucket)"
 
 # --- 4. grup & kuota home via occ ---
 # Nextcloud 35 mewajibkan password confirmation untuk mengubah grup/kuota

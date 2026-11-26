@@ -11,7 +11,11 @@ ini_set('session.use_strict_mode', '1');
 session_set_cookie_params([
     'httponly' => true,
     'secure' => $secure,
-    'samesite' => 'Strict',
+    // Lax (bukan Strict): callback OAuth Google adalah navigasi GET top-level
+    // lintas-situs — Strict akan menahan cookie session sehingga state OAuth
+    // tidak pernah cocok. POST lintas-situs tetap diblokir, dan endpoint POST
+    // kita sudah diproteksi CSRF token tersendiri.
+    'samesite' => 'Lax',
     'path' => '/',
 ]);
 session_start();
@@ -681,6 +685,217 @@ function callFossBillingAdmin(string $action, array $payload): array
     return is_array($json) ? $json : [];
 }
 
+// Varian callFossBillingAdmin yang ikut mengembalikan cookie sesi FossBilling
+// (dipakai alur bridge login Google, di mana admin client/login menerbitkan
+// session cookie untuk client yang baru login).
+function callFossBillingAdminSession(string $action, array $payload): array
+{
+    $token = trim((string) getenv('FOSSBILLING_ADMIN_TOKEN'));
+    if ($token === '' || !function_exists('curl_init')) {
+        return ['response' => null, 'cookies' => []];
+    }
+    $baseUrl = rtrim(trim(getenv('FOSSBILLING_BASE_URL') ?: 'http://localhost:8086'), '/');
+    $curl = curl_init($baseUrl . '/api/admin/' . ltrim($action, '/'));
+    if ($curl === false) {
+        return ['response' => null, 'cookies' => []];
+    }
+    curl_setopt_array($curl, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 20,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_POST => true,
+        CURLOPT_USERPWD => 'admin:' . $token,
+        CURLOPT_COOKIEFILE => '',
+        CURLOPT_HTTPHEADER => ['Content-Type: application/json', 'Accept: application/json'],
+        CURLOPT_POSTFIELDS => json_encode($payload),
+    ]);
+    $body = curl_exec($curl);
+    $cookies = fossBillingCookies($curl);
+    curl_close($curl);
+    $json = is_string($body) ? json_decode($body, true) : null;
+
+    return ['response' => is_array($json) ? $json : null, 'cookies' => $cookies];
+}
+
+// Mengambil cookie fossbilling_csrf untuk session client yang baru diterbitkan
+// admin client/login, dengan melakukan bootstrap GET / memakai session cookie
+// tersebut — pola yang sama dengan callFossBilling().
+function fossBillingSessionCsrfToken(string $sessionCookie): ?string
+{
+    if (!function_exists('curl_init')) {
+        return null;
+    }
+    $baseUrl = rtrim(trim(getenv('FOSSBILLING_BASE_URL') ?: 'http://localhost:8086'), '/');
+    $curl = curl_init($baseUrl . '/');
+    if ($curl === false) {
+        return null;
+    }
+    curl_setopt_array($curl, [
+        CURLOPT_CONNECTTIMEOUT => 3,
+        CURLOPT_TIMEOUT => 8,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPGET => true,
+        CURLOPT_COOKIEFILE => '',
+        CURLOPT_COOKIE => 'fossbilling_session=' . $sessionCookie,
+        CURLOPT_HTTPHEADER => ['Accept: text/html'],
+    ]);
+    curl_exec($curl);
+    $status = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+    $csrfToken = null;
+    foreach (curl_getinfo($curl, CURLINFO_COOKIELIST) ?: [] as $cookie) {
+        $parts = explode("\t", $cookie);
+        if (count($parts) === 7 && $parts[5] === 'fossbilling_csrf') {
+            $csrfToken = rawurldecode($parts[6]);
+            break;
+        }
+    }
+    curl_close($curl);
+
+    if ($status !== 200 || !is_string($csrfToken) || $csrfToken === ''
+        || strlen($csrfToken) > 4096 || preg_match('/[\r\n]/', $csrfToken) === 1) {
+        return null;
+    }
+
+    return $csrfToken;
+}
+
+// --- Google OAuth langsung (tanpa extension FOSSBilling) ---
+// OAuth code flow ditangani backend ini: google-start membangun URL consent,
+// google-callback menukar code, memverifikasi identitas via userinfo endpoint
+// Google, lalu login/ membuat client FossBilling lewat admin API.
+
+function googleOAuthConfig(): ?array
+{
+    $clientId = trim((string) getenv('GOOGLE_OAUTH_CLIENT_ID'));
+    $clientSecret = trim((string) getenv('GOOGLE_OAUTH_CLIENT_SECRET'));
+    if ($clientId === '' || $clientSecret === '') {
+        return null;
+    }
+
+    return ['client_id' => $clientId, 'client_secret' => $clientSecret];
+}
+
+// Redirect URI harus sama persis dengan yang didaftarkan di Google Console.
+// Dibangun dari host request agar konsisten dengan URL yang dipakai browser
+// (vite :5173 atau API :8001 sama-sama bisa, selama terdaftar di console).
+function googleOAuthRedirectUri(): string
+{
+    // Env override: harus sama persis dengan URI terdaftar di Google Console.
+    $envUri = trim((string) getenv('GOOGLE_OAUTH_REDIRECT_URI'));
+    if ($envUri !== '') {
+        return $envUri;
+    }
+
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host = trim((string) ($_SERVER['HTTP_HOST'] ?? ''));
+
+    // Host bisa jadi 0.0.0.0:8001 saat request lewat reverse proxy vite —
+    // tidak valid untuk Google. Fallback ke APP_PUBLIC_URL.
+    if ($host === '' || in_array(strtolower(explode(':', $host)[0]), ['0.0.0.0', '::'], true)) {
+        $appUrl = appPublicUrl();
+        if ($appUrl === null) {
+            return '';
+        }
+        $parts = parse_url($appUrl);
+        $scheme = strtolower((string) ($parts['scheme'] ?? $scheme));
+        $host = trim((string) ($parts['host'] ?? ''));
+        $port = isset($parts['port']) ? ':' . $parts['port'] : '';
+        $host .= $port;
+    }
+
+    if ($host === '' || preg_match('/[\x00-\x20\x7F]/', $host) === 1) {
+        return '';
+    }
+
+    return $scheme . '://' . $host . '/api/fossbilling-auth.php?action=google-callback';
+}
+
+function googleOAuthHttp(string $method, string $url, array $options = []): array
+{
+    if (!function_exists('curl_init')) {
+        throw new RuntimeException('The PHP cURL extension is unavailable.');
+    }
+    $curl = curl_init($url);
+    if ($curl === false) {
+        throw new RuntimeException('Unable to initialize Google OAuth request.');
+    }
+    $defaults = [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 15,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_HTTPHEADER => ['Accept: application/json'],
+    ];
+    if ($method === 'POST') {
+        $defaults[CURLOPT_POST] = true;
+        $defaults[CURLOPT_HTTPHEADER][] = 'Content-Type: application/x-www-form-urlencoded';
+        $defaults[CURLOPT_POSTFIELDS] = http_build_query($options['form'] ?? []);
+    } elseif (isset($options['bearer'])) {
+        $defaults[CURLOPT_HTTPHEADER][] = 'Authorization: Bearer ' . $options['bearer'];
+    }
+    curl_setopt_array($curl, $defaults);
+    $body = curl_exec($curl);
+    $status = (int) curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
+    curl_close($curl);
+    $json = is_string($body) ? json_decode($body, true) : null;
+
+    return ['status' => $status, 'json' => is_array($json) ? $json : null];
+}
+
+// Menerbitkan session FossBilling untuk client id tertentu (dipakai login
+// Google direct; pola sama dengan google-bridge-confirm).
+function establishFossBillingClientSession(int $clientId): void
+{
+    $login = callFossBillingAdminSession('client/login', ['id' => $clientId]);
+    $client = $login['response']['result'] ?? null;
+    $sessionCookie = $login['cookies']['fossbilling_session'] ?? null;
+    if (!is_array($client) || !is_string($sessionCookie) || $sessionCookie === '') {
+        throw new RuntimeException('FossBilling tidak dapat menerbitkan sesi client.');
+    }
+
+    $csrfToken = fossBillingSessionCsrfToken($sessionCookie);
+    $cookies = ['fossbilling_session' => $sessionCookie];
+    if (is_string($csrfToken) && $csrfToken !== '') {
+        $cookies['fossbilling_csrf'] = $csrfToken;
+    }
+
+    session_regenerate_id(true);
+    $_SESSION['fossbilling_authenticated'] = true;
+    $_SESSION['fossbilling_client'] = [
+        'id' => (int) ($client['id'] ?? $clientId),
+        'name' => $client['name'] ?? '',
+        'first_name' => '',
+        'last_name' => '',
+        'email' => $client['email'] ?? '',
+    ];
+    $_SESSION['fossbilling_cookies'] = $cookies;
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+
+    try {
+        $profile = profileResponse();
+        if (profileBelongsToSession($profile)) {
+            $_SESSION['fossbilling_client'] = [
+                'id' => (int) ($profile['id'] ?? $clientId),
+                'name' => trim(($profile['first_name'] ?? '') . ' ' . ($profile['last_name'] ?? '')) ?: ($client['name'] ?? ''),
+                'first_name' => $profile['first_name'] ?? '',
+                'last_name' => $profile['last_name'] ?? '',
+                'email' => $profile['email'] ?? ($client['email'] ?? ''),
+            ];
+        }
+    } catch (Throwable $error) {
+        error_log('FossBilling google session profile enrich error: ' . $error->getMessage());
+    }
+}
+
+function googleOAuthFail(string $reason): never
+{
+    error_log('FossBilling Google OAuth error: ' . $reason);
+    $appUrl = appPublicUrl();
+    header('Location: ' . ($appUrl !== null ? $appUrl : '') . '/login?google_error=1', true, 302);
+    exit;
+}
+
 const QRISLY_PREFIX = 'QRISLY-';
 const GOPAY_PREFIX = 'GOPAY-';
 
@@ -1069,6 +1284,23 @@ function validateProfileInput(array $input): array
     return $payload;
 }
 
+// URL publik frontend (SPA). Dipakai redirect pasca bridge login Google agar
+// tidak nyasar ke root server API (mis. php -S :8001 di dev). Kosong = relatif.
+function appPublicUrl(): ?string
+{
+    $url = trim((string) getenv('APP_PUBLIC_URL'));
+    if ($url === '' || strlen($url) > 2048 || preg_match('/[\x00-\x20\x7F]/', $url) === 1) {
+        return null;
+    }
+    $parts = parse_url($url);
+    $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+    if (!in_array($scheme, ['http', 'https'], true) || trim((string) ($parts['host'] ?? '')) === '') {
+        return null;
+    }
+
+    return rtrim($url, '/');
+}
+
 function fossbillingPublicUrl(): string
 {
     $url = trim((string) getenv('FOSSBILLING_PUBLIC_URL'));
@@ -1163,6 +1395,37 @@ function fossProductConfigs(): array
     }
 
     return $cache;
+}
+
+// Harga katalog terbaru untuk periode order. Dipakai agar menu Layanan
+// menampilkan harga produk saat ini, bukan harga historis saat order dibuat.
+function latestProductPrice(array $fbProduct, $period): ?float
+{
+    $pricing = $fbProduct['pricing'] ?? null;
+    if (!is_array($pricing)) {
+        return null;
+    }
+    $type = $pricing['type'] ?? '';
+    if ($type === 'recurrent' || is_array($pricing['recurrent'] ?? null)) {
+        $recurrent = is_array($pricing['recurrent'] ?? null) ? $pricing['recurrent'] : [];
+        if (is_string($period) && $period !== ''
+            && isset($recurrent[$period]) && is_array($recurrent[$period])
+            && is_numeric($recurrent[$period]['price'] ?? null)) {
+            return (float) $recurrent[$period]['price'];
+        }
+
+        return null;
+    }
+    if ($type === 'once') {
+        $price = $pricing['once']['price'] ?? null;
+
+        return is_numeric($price) ? (float) $price : null;
+    }
+    if ($type === 'free') {
+        return 0.0;
+    }
+
+    return null;
 }
 
 function storageProductInfo(array $order): ?array
@@ -2087,12 +2350,21 @@ $storageDirectory = dirname(__DIR__, 2) . '/storage';
 
 if ($action === 'status' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     $_SESSION['csrf_token'] ??= bin2hex(random_bytes(32));
+    $fossbillingPublic = fossbillingPublicUrl();
     respond([
         'authenticated' => !empty($_SESSION['fossbilling_authenticated']),
-        'client' => $_SESSION['fossbilling_authenticated']
+        'client' => !empty($_SESSION['fossbilling_authenticated'])
             ? ($_SESSION['fossbilling_client'] ?? null)
             : null,
         'csrfToken' => $_SESSION['csrf_token'],
+        'googleBridgePending' => !empty($_SESSION['google_bridge_client_id']),
+        'googleAuth' => [
+            'direct_url' => googleOAuthConfig() !== null
+                ? ((appPublicUrl() ?? '') . '/api/fossbilling-auth.php?action=google-start')
+                : null,
+            'login_url' => $fossbillingPublic . '/googleauth/login?redirect=' . rawurlencode('/googleauth/bridge'),
+            'signup_url' => $fossbillingPublic . '/googleauth/signup?redirect=' . rawurlencode('/googleauth/bridge'),
+        ],
     ]);
 }
 
@@ -2112,6 +2384,206 @@ if ($action === 'profile' && $_SERVER['REQUEST_METHOD'] === 'GET') {
         error_log('FossBilling profile API error: ' . $error->getMessage());
         respond(['error' => 'Profil tidak dapat dimuat dari server akun. Coba lagi nanti.'], 502);
     }
+}
+
+// --- Penggabungan order untuk produk yang sama ---
+// Setiap cart/checkout membuat baris order baru di FossBilling. Secara bisnis,
+// membeli ulang produk yang masih aktif harus menambah masa aktif order yang
+// ada — bukan menampilkan order ganda di menu Layanan. Rekonsiliasi dilakukan
+// lazy di sini karena pembayaran bisa dikonfirmasi lewat beberapa jalur
+// (polling payment-status, callback Komerce, pembayaran saldo).
+
+function fossBillingOrderTs($value): ?int
+{
+    if (!is_string($value) || trim($value) === '') {
+        return null;
+    }
+    $ts = strtotime($value);
+
+    return $ts === false ? null : $ts;
+}
+
+function fossBillingAdminWriteOk(array $response): bool
+{
+    return !isset($response['error'])
+        && array_key_exists('result', $response)
+        && ($response['result'] === true || $response['result'] === 1 || $response['result'] === '1');
+}
+
+function orderMergeStoreFile(int $clientId): ?string
+{
+    if ($clientId <= 0) {
+        return null;
+    }
+    $dir = dirname(__DIR__, 2) . '/storage/order-merges';
+    if (!is_dir($dir) && !mkdir($dir, 0700, true) && !is_dir($dir)) {
+        return null;
+    }
+
+    return $dir . '/' . $clientId . '.json';
+}
+
+function loadOrderMerges(int $clientId): array
+{
+    $file = orderMergeStoreFile($clientId);
+    if ($file === null || !is_file($file)) {
+        return [];
+    }
+    $data = json_decode((string) @file_get_contents($file), true);
+
+    return is_array($data['absorbed'] ?? null) ? $data['absorbed'] : [];
+}
+
+function recordOrderMerges(int $clientId, array $absorbed): void
+{
+    $file = orderMergeStoreFile($clientId);
+    if ($file === null || $absorbed === []) {
+        return;
+    }
+    $existing = loadOrderMerges($clientId);
+    foreach ($absorbed as $orderId => $primaryId) {
+        $existing[(string) $orderId] = ['primary' => (int) $primaryId, 'at' => time()];
+    }
+    $tmp = $file . '.tmp';
+    if (@file_put_contents($tmp, json_encode(['absorbed' => $existing])) !== false) {
+        @rename($tmp, $file);
+    }
+}
+
+function mergeDuplicateServiceOrders(array $orders): array
+{
+    $clientId = currentFossClientId();
+    if ($clientId <= 0) {
+        return $orders;
+    }
+    $absorbedIds = loadOrderMerges($clientId);
+
+    // Order yang sudah tercatat sebagai hasil gabungan selalu disembunyikan;
+    // bila pembatalan FossBilling sebelumnya gagal, coba lagi di sini.
+    $visible = [];
+    foreach ($orders as $order) {
+        $id = (string) ($order['id'] ?? '');
+        if ($id !== '' && isset($absorbedIds[$id])) {
+            $status = strtolower((string) ($order['status'] ?? ''));
+            if (in_array($status, ['active', 'paid'], true)) {
+                $retry = callFossBillingAdmin('order/update', [
+                    'id' => (int) $id,
+                    'status' => 'canceled',
+                    'reason' => 'Digabung ke order #' . (int) ($absorbedIds[$id]['primary'] ?? 0) . ' (perpanjangan produk yang sama)',
+                ]);
+                if (!fossBillingAdminWriteOk($retry)) {
+                    error_log('FossBilling order merge retry cancel gagal untuk order #' . $id . ': ' . json_encode($retry));
+                }
+            }
+            continue;
+        }
+        $visible[] = $order;
+    }
+    $orders = $visible;
+
+    // Kelompokkan order aktif per product_id.
+    $groups = [];
+    foreach ($orders as $index => $order) {
+        if (!in_array(strtolower((string) ($order['status'] ?? '')), ['active', 'paid'], true)) {
+            continue;
+        }
+        $productId = $order['product_id'] ?? null;
+        $expiresTs = fossBillingOrderTs($order['expires_at'] ?? null);
+        // Order lifetime (tanpa expires_at) atau sudah kedaluwarsa tidak digabung.
+        if ($productId === null || $productId === '' || $expiresTs === null || $expiresTs < strtotime('today')) {
+            continue;
+        }
+        $groups[(string) $productId][] = $index;
+    }
+
+    $newAbsorbed = [];
+    $expiryPatches = [];
+    foreach ($groups as $indexes) {
+        if (count($indexes) < 2) {
+            continue;
+        }
+        usort($indexes, static function (int $a, int $b) use ($orders): int {
+            $orderA = $orders[$a];
+            $orderB = $orders[$b];
+            $timeA = fossBillingOrderTs($orderA['activated_at'] ?? null)
+                ?? fossBillingOrderTs($orderA['created_at'] ?? null)
+                ?? (int) ($orderA['id'] ?? 0);
+            $timeB = fossBillingOrderTs($orderB['activated_at'] ?? null)
+                ?? fossBillingOrderTs($orderB['created_at'] ?? null)
+                ?? (int) ($orderB['id'] ?? 0);
+
+            return $timeA <=> $timeB;
+        });
+
+        $primaryIndex = $indexes[0];
+        $primary = $orders[$primaryIndex];
+        $cumulativeExpiry = fossBillingOrderTs($primary['expires_at']);
+        $absorbed = [];
+        foreach (array_slice($indexes, 1) as $index) {
+            $order = $orders[$index];
+            $anchor = fossBillingOrderTs($order['activated_at'] ?? null)
+                ?? fossBillingOrderTs($order['created_at'] ?? null)
+                ?? 0;
+            $expires = fossBillingOrderTs($order['expires_at']);
+            // Berhenti saat ada jeda masa non-aktif, atau data tanggal tidak valid.
+            if ($expires === null || $anchor > $cumulativeExpiry || $expires <= $anchor) {
+                break;
+            }
+            $absorbed[] = $index;
+            $cumulativeExpiry += $expires - $anchor;
+        }
+        if ($absorbed === []) {
+            continue;
+        }
+
+        $primaryId = (int) $primary['id'];
+        $newExpiry = date('Y-m-d H:i:s', $cumulativeExpiry);
+        $update = callFossBillingAdmin('order/update', [
+            'id' => $primaryId,
+            'expires_at' => $newExpiry,
+        ]);
+        if (!fossBillingAdminWriteOk($update)) {
+            error_log('FossBilling order merge gagal update expires_at order #' . $primaryId . ': ' . json_encode($update));
+            continue;
+        }
+
+        // Catat semua order yang diserap agar tidak memperpanjang berulang;
+        // pembatalan di FossBilling tetap dicoba (best effort).
+        foreach ($absorbed as $index) {
+            $orderId = (int) $orders[$index]['id'];
+            $newAbsorbed[$orderId] = $primaryId;
+            $cancel = callFossBillingAdmin('order/update', [
+                'id' => $orderId,
+                'status' => 'canceled',
+                'reason' => 'Digabung ke order #' . $primaryId . ' (perpanjangan produk yang sama)',
+            ]);
+            if (!fossBillingAdminWriteOk($cancel)) {
+                error_log('FossBilling order merge gagal cancel order #' . $orderId . ': ' . json_encode($cancel));
+            }
+        }
+        $expiryPatches[$primaryId] = $newExpiry;
+    }
+
+    if ($newAbsorbed !== []) {
+        recordOrderMerges($clientId, $newAbsorbed);
+    }
+    if ($expiryPatches === [] && $newAbsorbed === []) {
+        return $orders;
+    }
+
+    $result = [];
+    foreach ($orders as $order) {
+        $id = (string) ($order['id'] ?? '');
+        if ($id !== '' && isset($newAbsorbed[(int) $id])) {
+            continue;
+        }
+        if (isset($expiryPatches[(int) $id])) {
+            $order['expires_at'] = $expiryPatches[(int) $id];
+        }
+        $result[] = $order;
+    }
+
+    return $result;
 }
 
 if ($action === 'services' && $_SERVER['REQUEST_METHOD'] === 'GET') {
@@ -2160,12 +2632,19 @@ if ($action === 'services' && $_SERVER['REQUEST_METHOD'] === 'GET') {
                 throw new RuntimeException('FossBilling returned an invalid order record.');
             }
 
+            $orderProductId = isset($order['product_id']) ? (string) $order['product_id'] : null;
+            $fbProduct = $orderProductId !== null ? (fossProductConfigs()[$orderProductId] ?? null) : null;
+            $latestPrice = is_array($fbProduct)
+                ? latestProductPrice($fbProduct, $order['period'] ?? null)
+                : null;
+
             $orders[] = [
                 'id' => (string) $order['id'],
                 'title' => $order['title'],
                 'status' => $order['status'],
                 'currency' => $order['currency'] ?? null,
-                'price' => $order['price'] ?? null,
+                'price' => $latestPrice ?? ($order['price'] ?? null),
+                'paid_price' => $order['price'] ?? null,
                 'period' => $order['period'] ?? null,
                 'expires_at' => $order['expires_at'] ?? null,
                 'product_id' => isset($order['product_id']) ? (string) $order['product_id'] : null,
@@ -2181,6 +2660,8 @@ if ($action === 'services' && $_SERVER['REQUEST_METHOD'] === 'GET') {
                 'storage' => storageProductInfo($order),
             ];
         }
+
+        $orders = mergeDuplicateServiceOrders($orders);
 
         $activeForStorage = array_values(array_filter($orders, static function (array $order): bool {
             if (!in_array($order['status'], ['active', 'paid'], true)) {
@@ -2200,6 +2681,31 @@ if ($action === 'services' && $_SERVER['REQUEST_METHOD'] === 'GET') {
         } catch (Throwable $error) {
             error_log('Nextcloud storage sync error: ' . $error->getMessage());
         }
+
+        // Usage per bucket diisi provisioning cron (storage/usage.json).
+        // Key: provider|bucket — bucket = '{bucket_base}-{clientId}'.
+        $usageFile = dirname(__DIR__, 2) . '/storage/usage.json';
+        $usageRaw = is_file($usageFile) ? json_decode((string) @file_get_contents($usageFile), true) : null;
+        $usageMap = is_array($usageRaw['usage'] ?? null) ? $usageRaw['usage'] : [];
+        $usageUser = 'fb_' . currentFossClientId();
+        foreach ($orders as &$order) {
+            $info = $order['storage'] ?? null;
+            if (!is_array($info)) {
+                continue;
+            }
+            $bucketBase = is_string($info['bucket'] ?? null) && $info['bucket'] !== ''
+                ? $info['bucket'] : ($info['group'] ?? '');
+            if ($bucketBase === '') {
+                continue;
+            }
+            $usageKey = (is_string($info['provider'] ?? null) && $info['provider'] !== '' ? $info['provider'] : 'default')
+                . '|' . $bucketBase . '-' . currentFossClientId();
+            $used = $usageMap[$usageUser][$usageKey] ?? null;
+            if (is_int($used) || (is_string($used) && ctype_digit($used))) {
+                $order['storage']['used_bytes'] = (int) $used;
+            }
+        }
+        unset($order);
 
         respond(['orders' => $orders, 'storage' => $storageSummary]);
     } catch (DomainException $error) {
@@ -2859,7 +3365,169 @@ if ($action === 'email' && $_SERVER['REQUEST_METHOD'] === 'GET') {
     }
 }
 
-if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state', 'cart-add', 'cart-remove', 'checkout', 'checkout-balance', 'pay-invoice', 'wallet-topup', 'pay-invoice-balance', 'payment-cancel', 'email-resend', 'email-delete'], true)
+// Login/daftar Google langsung dari web (tanpa extension FOSSBilling).
+// google-start menyimpan state di session PHP lalu redirect ke consent Google;
+// google-callback menukar code, memverifikasi email lewat userinfo endpoint,
+// lalu login existing client atau membuat client baru via admin API.
+if ($action === 'google-start' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    $config = googleOAuthConfig();
+    $redirectUri = googleOAuthRedirectUri();
+    if ($config === null || $redirectUri === '') {
+        respond(['error' => 'Login dengan Google belum dikonfigurasi.'], 503);
+    }
+
+    $state = bin2hex(random_bytes(16));
+    $_SESSION['google_oauth_state'] = $state;
+
+    $query = http_build_query([
+        'client_id' => $config['client_id'],
+        'redirect_uri' => $redirectUri,
+        'response_type' => 'code',
+        'scope' => 'openid email profile',
+        'state' => $state,
+        'prompt' => 'select_account',
+    ]);
+    header('Location: https://accounts.google.com/o/oauth2/v2/auth?' . $query, true, 302);
+    exit;
+}
+
+if ($action === 'google-callback' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    $config = googleOAuthConfig();
+    if ($config === null) {
+        googleOAuthFail('OAuth client belum dikonfigurasi');
+    }
+
+    $state = $_GET['state'] ?? null;
+    $expectedState = $_SESSION['google_oauth_state'] ?? null;
+    unset($_SESSION['google_oauth_state']);
+    if (!is_string($state) || !is_string($expectedState) || $state === '' || !hash_equals($expectedState, $state)) {
+        googleOAuthFail('state OAuth tidak cocok');
+    }
+
+    if (isset($_GET['error'])) {
+        googleOAuthFail('user membatalkan consent Google');
+    }
+
+    $code = $_GET['code'] ?? null;
+    if (!is_string($code) || $code === '' || strlen($code) > 4096) {
+        googleOAuthFail('authorization code tidak valid');
+    }
+
+    try {
+        $token = googleOAuthHttp('POST', 'https://oauth2.googleapis.com/token', [
+            'form' => [
+                'code' => $code,
+                'client_id' => $config['client_id'],
+                'client_secret' => $config['client_secret'],
+                'redirect_uri' => googleOAuthRedirectUri(),
+                'grant_type' => 'authorization_code',
+            ],
+        ]);
+        $accessToken = $token['json']['access_token'] ?? null;
+        if ($token['status'] !== 200 || !is_string($accessToken) || $accessToken === '') {
+            $googleError = is_array($token['json']) ? ($token['json']['error'] ?? 'unknown') : 'invalid response';
+            googleOAuthFail('penukaran token Google gagal (HTTP ' . $token['status'] . ', ' . $googleError . ')');
+        }
+
+        $userinfo = googleOAuthHttp('GET', 'https://openidconnect.googleapis.com/v1/userinfo', ['bearer' => $accessToken]);
+        $profile = $userinfo['json'] ?? null;
+        $email = is_array($profile) ? ($profile['email'] ?? null) : null;
+        if ($userinfo['status'] !== 200 || !is_string($email) || !filter_var($email, FILTER_VALIDATE_EMAIL)
+            || ($profile['email_verified'] ?? false) !== true) {
+            googleOAuthFail('identitas Google tidak terverifikasi');
+        }
+        $email = strtolower(trim($email));
+
+        // Cari client existing by email (email Google sudah terverifikasi).
+        $existing = callFossBillingAdmin('client/get', ['email' => $email]);
+        $clientId = (int) ($existing['result']['id'] ?? 0);
+
+        if ($clientId <= 0) {
+            $givenName = is_string($profile['given_name'] ?? null) ? trim($profile['given_name']) : '';
+            $familyName = is_string($profile['family_name'] ?? null) ? trim($profile['family_name']) : '';
+            if ($givenName === '' && $familyName === '') {
+                $fullName = is_string($profile['name'] ?? null) ? trim($profile['name']) : '';
+                $parts = $fullName === '' ? [] : preg_split('/\s+/', $fullName, 2);
+                $givenName = $parts[0] ?? '';
+                $familyName = $parts[1] ?? '';
+            }
+            if ($givenName === '') {
+                $givenName = strstr($email, '@', true) ?: 'Pelanggan';
+            }
+
+            // Password acak: akun ini hanya dipakai via Google; user bisa
+            // reset password lewat email bila ingin login dengan password.
+            // Komposisi dijamin punya huruf besar/kecil/angka (validator
+            // isPasswordStrong FossBilling menolak hex lowercase saja).
+            $alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+            $randomPassword = 'Aa1' . bin2hex(random_bytes(12));
+            for ($i = 0; $i < 16; $i++) {
+                $randomPassword .= $alphabet[random_int(0, strlen($alphabet) - 1)];
+            }
+            $create = callFossBillingAdmin('client/create', [
+                'email' => $email,
+                'first_name' => mb_substr($givenName, 0, 100),
+                'last_name' => mb_substr($familyName, 0, 100),
+                'password' => $randomPassword,
+                'send_welcome_email' => false,
+                'currency' => 'IDR',
+            ]);
+            $clientId = (int) ($create['result'] ?? 0);
+
+            if ($clientId <= 0) {
+                error_log('FossBilling Google OAuth client/create gagal: ' . json_encode($create));
+                // Kemungkinan race: email baru saja didaftarkan — coba lookup ulang.
+                $retry = callFossBillingAdmin('client/get', ['email' => $email]);
+                $clientId = (int) ($retry['result']['id'] ?? 0);
+            }
+            if ($clientId <= 0) {
+                googleOAuthFail('pembuatan akun FossBilling gagal');
+            }
+        }
+
+        establishFossBillingClientSession($clientId);
+    } catch (Throwable $error) {
+        googleOAuthFail($error->getMessage());
+    }
+
+    $appUrl = appPublicUrl();
+    header('Location: ' . ($appUrl !== null ? $appUrl : '') . '/dashboard', true, 302);
+    exit;
+}
+
+// Bridge dari extension Googleauth FOSSBilling: setelah login Google sukses di
+// domain FOSSBilling, browser diarahkan ke sini membawa ticket sekali-pakai.
+// Ticket ditukar (via admin API) menjadi client id yang disimpan sebagai
+// "pending" — login sesungguhnya baru terjadi setelah POST
+// google-bridge-confirm dengan CSRF token, supaya tidak ada login-CSRF.
+if ($action === 'google-bridge' && $_SERVER['REQUEST_METHOD'] === 'GET') {
+    $ticket = (string) ($_GET['ticket'] ?? '');
+    if (preg_match('/^[a-f0-9]{64}$/', $ticket) !== 1) {
+        respond(['error' => 'Tautan login Google tidak valid. Silakan coba lagi.'], 400);
+    }
+
+    try {
+        $claim = callFossBillingAdmin('googleauth/bridge_claim', ['ticket' => $ticket]);
+    } catch (Throwable $error) {
+        error_log('FossBilling google-bridge claim error: ' . $error->getMessage());
+        respond(['error' => 'Login Google gagal. Silakan coba lagi.'], 502);
+    }
+
+    $clientId = (int) ($claim['result']['client_id'] ?? 0);
+    if ($clientId <= 0) {
+        respond(['error' => 'Tautan login Google sudah kedaluwarsa atau sudah dipakai. Silakan coba lagi.'], 410);
+    }
+
+    $_SESSION['google_bridge_client_id'] = $clientId;
+
+    // Kembali ke halaman login SPA agar konfirmasi pending ditawarkan.
+    // APP_PUBLIC_URL dipakai bila frontend dan API beda origin (dev: vite :5173).
+    $appUrl = appPublicUrl();
+    header('Location: ' . ($appUrl !== null ? $appUrl : '') . '/login', true, 302);
+    exit;
+}
+
+if (!in_array($action, ['login', 'create', 'logout', 'profile-update', 'password-change', 'ticket-create', 'ticket-reply', 'ticket-close', 'storage-url', 'notification-state', 'cart-add', 'cart-remove', 'checkout', 'checkout-balance', 'pay-invoice', 'wallet-topup', 'pay-invoice-balance', 'payment-cancel', 'email-resend', 'email-delete', 'google-bridge-confirm'], true)
     || $_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(['error' => 'Permintaan tidak valid.'], 405);
 }
@@ -3728,6 +4396,60 @@ try {
         respond(['profile' => $updatedProfile]);
     }
 
+    if ($action === 'google-bridge-confirm') {
+        $clientId = (int) ($_SESSION['google_bridge_client_id'] ?? 0);
+        unset($_SESSION['google_bridge_client_id']);
+        if ($clientId <= 0) {
+            respond(['error' => 'Sesi login Google sudah kedaluwarsa. Silakan login dengan Google lagi.'], 410);
+        }
+
+        // admin client/login menerbitkan session FossBilling untuk client tsb;
+        // cookie-nya kita simpan di session PHP seperti login biasa.
+        $login = callFossBillingAdminSession('client/login', ['id' => $clientId]);
+        $client = $login['response']['result'] ?? null;
+        $sessionCookie = $login['cookies']['fossbilling_session'] ?? null;
+        if (!is_array($client) || !is_string($sessionCookie) || $sessionCookie === '') {
+            error_log('FossBilling google-bridge-confirm: admin client/login gagal.');
+            respond(['error' => 'Login Google gagal. Silakan coba lagi.'], 502);
+        }
+
+        $csrfToken = fossBillingSessionCsrfToken($sessionCookie);
+        $cookies = ['fossbilling_session' => $sessionCookie];
+        if (is_string($csrfToken) && $csrfToken !== '') {
+            $cookies['fossbilling_csrf'] = $csrfToken;
+        }
+
+        session_regenerate_id(true);
+        $_SESSION['fossbilling_authenticated'] = true;
+        $_SESSION['fossbilling_client'] = [
+            'id' => (int) ($client['id'] ?? $clientId),
+            'name' => $client['name'] ?? '',
+            'first_name' => '',
+            'last_name' => '',
+            'email' => $client['email'] ?? '',
+        ];
+        $_SESSION['fossbilling_cookies'] = $cookies;
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+
+        // Perkaya data nama dari profil bila memungkinkan (best effort).
+        try {
+            $profile = profileResponse();
+            if (profileBelongsToSession($profile)) {
+                $_SESSION['fossbilling_client'] = [
+                    'id' => (int) ($profile['id'] ?? $clientId),
+                    'name' => trim(($profile['first_name'] ?? '') . ' ' . ($profile['last_name'] ?? '')) ?: ($client['name'] ?? ''),
+                    'first_name' => $profile['first_name'] ?? '',
+                    'last_name' => $profile['last_name'] ?? '',
+                    'email' => $profile['email'] ?? ($client['email'] ?? ''),
+                ];
+            }
+        } catch (Throwable $error) {
+            error_log('FossBilling google-bridge-confirm profile enrich error: ' . $error->getMessage());
+        }
+
+        respond(['result' => true, 'error' => null]);
+    }
+
     if ($action === 'login' && loginIsRateLimited($storageDirectory)) {
         header('Retry-After: 900');
         respond(['error' => 'Terlalu banyak percobaan masuk. Coba lagi dalam 15 menit.'], 429);
@@ -3780,6 +4502,9 @@ try {
     $firstName = $input['first_name'] ?? null;
     $lastName = $input['last_name'] ?? '';
     $passwordConfirm = $input['password_confirm'] ?? null;
+    $phoneCc = $input['phone_cc'] ?? null;
+    $phone = $input['phone'] ?? null;
+    $currency = $input['currency'] ?? null;
     if (
         !is_string($firstName) || trim($firstName) === '' || strlen($firstName) > 100
         || !is_string($lastName) || strlen($lastName) > 100
@@ -3789,13 +4514,49 @@ try {
         respond(['error' => 'Periksa kembali data pendaftaran.'], 422);
     }
 
-    callFossBilling(authBaseUrl(), 'create', [
+    // guestCreateClient hanya meneruskan phone/phone_cc; currency di-set
+    // terpisah lewat admin API setelah akun dibuat.
+    $phoneCcDigits = null;
+    if ($phoneCc !== null && $phoneCc !== '') {
+        if (!is_string($phoneCc) || strlen($phoneCc) > 8) {
+            respond(['error' => 'Kode negara telepon tidak valid.'], 422);
+        }
+        $phoneCcDigits = preg_replace('/\D/', '', $phoneCc);
+        if ($phoneCcDigits === '' || (int) $phoneCcDigits > 999) {
+            respond(['error' => 'Kode negara telepon tidak valid.'], 422);
+        }
+    }
+    if ($phone !== null && $phone !== '') {
+        $phoneDigits = is_string($phone) ? strlen((string) preg_replace('/\D/', '', $phone)) : 0;
+        if (!is_string($phone) || strlen($phone) > 32
+            || preg_match('/^[0-9() .-]+$/', $phone) !== 1
+            || $phoneDigits < 5 || $phoneDigits > 12) {
+            respond(['error' => 'Nomor telepon tidak valid. Gunakan format tanpa tanda +.'], 422);
+        }
+    }
+    if ($currency !== null && $currency !== '') {
+        if (!is_string($currency) || !in_array(strtoupper($currency), ['IDR', 'USD'], true)) {
+            respond(['error' => 'Mata uang tidak didukung.'], 422);
+        }
+        $currency = strtoupper($currency);
+    } else {
+        $currency = null;
+    }
+
+    $createPayload = [
         'first_name' => trim($firstName),
         'last_name' => trim($lastName),
         'email' => $email,
         'password' => $password,
         'password_confirm' => $passwordConfirm,
-    ]);
+    ];
+    if ($phoneCcDigits !== null) {
+        $createPayload['phone_cc'] = $phoneCcDigits;
+    }
+    if (is_string($phone) && trim($phone) !== '') {
+        $createPayload['phone'] = trim($phone);
+    }
+    callFossBilling(authBaseUrl(), 'create', $createPayload);
     $login = callFossBilling(authBaseUrl(), 'login', ['email' => $email, 'password' => $password]);
     $client = $login['response']['result'];
     if (!isset($login['cookies']['fossbilling_session'])) {
@@ -3812,6 +4573,17 @@ try {
     ];
     $_SESSION['fossbilling_cookies'] = $login['cookies'];
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+
+    if ($currency !== null) {
+        $adminUpdate = callFossBillingAdmin('client/update', [
+            'id' => (int) $client['id'],
+            'currency' => $currency,
+        ]);
+        if (($adminUpdate['result'] ?? null) !== true) {
+            error_log('FossBilling currency update gagal untuk client ' . ($client['id'] ?? '?') . ': ' . json_encode($adminUpdate));
+        }
+    }
+
     respond(['result' => true, 'error' => null]);
 } catch (DomainException $error) {
     respond(['error' => $error->getMessage()], $error->getCode() ?: 422);

@@ -8,8 +8,12 @@ export default function SiteFooter({ locale, t }) {
         <div className="flex flex-col justify-between gap-7 py-8 md:flex-row md:items-center">
           <div>
             <a className="brand-lockup" href={pathFor(locale)} aria-label="Sangatta Cloud home">
-              <span className="brand-mark footer-brand-mark">
-                <Cloud size={19} strokeWidth={2.2} />
+              <span className="auth-brand-mark footer-brand-mark">
+                <img
+     src="/images/logo-sc-grey.svg"
+     alt="Sangatta Cloud"
+     className="h-[30px] w-[30px] object-contain"
+   />
               </span>
               <span className="text-teal text-[20px] font-bold tracking-[-0.04em]">
                 Sangatta <span className="text-[#8a94a6]">Cloud</span> <span className="text-ember animate-pulse">.</span>
